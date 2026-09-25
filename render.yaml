@@ -1,31 +1,32 @@
 # Render blueprint — https://render.com/docs/blueprint-spec
 #
-# Advanced Posting Bot is a long-polling Telegram bot: it makes *outbound*
-# HTTPS calls to api.telegram.org and needs no inbound traffic. A **Background
-# Worker** is therefore the natural (and cheapest) shape — no port, no health
-# check, no public URL.
+# This is a Node.js app (Runtime: Node, start: npm start). It polls Telegram
+# over outbound HTTPS and also serves a status page so Render's health check
+# has something to probe (/health always answers 200; /ready turns 200 once the
+# bot has logged in).
 #
 # Use this file:  Render → New → Blueprint → pick this repo.
-# If your service is currently a *Web Service* on the **Node** runtime, that is
-# the crash loop you are seeing: change Runtime to Python (or Docker) and the
-# start command to `python bot.py`. See DEPLOY.md.
-#
-# Python version comes from .python-version (3.12.10).
+# If your service is currently a Web Service on the **Python** runtime with
+# start command `python bot.py`, that is the crash loop (there is no Python in
+# the repo any more) — switch Runtime to Node, build `npm install`, start
+# `npm start`, health check path `/health`. See DEPLOY.md.
 services:
-  - type: worker
+  - type: web
     name: advanced-posting-bot
-    runtime: python
+    runtime: node
     plan: free
-    region: frankfurt           # change to taste
-    buildCommand: pip install -r requirements.txt
-    startCommand: python bot.py --no-health
-    healthCheckPath: null       # workers are not HTTP-probed
+    region: frankfurt                 # change to taste
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /health
     envVars:
-      - key: APB_TOKEN          # bot token from @BotFather — set in the dashboard
+      - key: NODE_VERSION
+        value: "20"
+      - key: APB_TOKEN                # bot token from @BotFather — set in the dashboard
         sync: false
-      - key: APB_ADMINS         # your Telegram user id(s), comma-separated
+      - key: APB_ADMINS               # your Telegram user id(s), comma-separated
         sync: false
-      - key: APB_NVIDIA_KEY     # optional, free AI features (build.nvidia.com)
+      - key: APB_NVIDIA_KEY           # optional, free AI features (build.nvidia.com)
         sync: false
       # Render's filesystem is wiped on every deploy; attach a Disk and point
       # APB_DATA_DIR at its mount path to keep chats/drafts/schedules.
