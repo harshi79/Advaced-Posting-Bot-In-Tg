@@ -1,0 +1,37 @@
+# Render blueprint — https://render.com/docs/blueprint-spec
+#
+# Advanced Posting Bot is a long-polling Telegram bot: it makes *outbound*
+# HTTPS calls to api.telegram.org and needs no inbound traffic. A **Background
+# Worker** is therefore the natural (and cheapest) shape — no port, no health
+# check, no public URL.
+#
+# Use this file:  Render → New → Blueprint → pick this repo.
+# If your service is currently a *Web Service* on the **Node** runtime, that is
+# the crash loop you are seeing: change Runtime to Python (or Docker) and the
+# start command to `python bot.py`. See DEPLOY.md.
+#
+# Python version comes from .python-version (3.12.10).
+services:
+  - type: worker
+    name: advanced-posting-bot
+    runtime: python
+    plan: free
+    region: frankfurt           # change to taste
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py --no-health
+    healthCheckPath: null       # workers are not HTTP-probed
+    envVars:
+      - key: APB_TOKEN          # bot token from @BotFather — set in the dashboard
+        sync: false
+      - key: APB_ADMINS         # your Telegram user id(s), comma-separated
+        sync: false
+      - key: APB_NVIDIA_KEY     # optional, free AI features (build.nvidia.com)
+        sync: false
+      # Render's filesystem is wiped on every deploy; attach a Disk and point
+      # APB_DATA_DIR at its mount path to keep chats/drafts/schedules.
+      - key: APB_DATA_DIR
+        value: /var/data
+    disk:
+      name: apb-data
+      mountPath: /var/data
+      sizeGB: 1
