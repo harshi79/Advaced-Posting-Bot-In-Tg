@@ -15,12 +15,15 @@ into a posting workflow:
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 import traceback
 
 from . import content, rich as R
 from .api import TelegramError
+from .nvidia import NVIDIA
+from .posto import PostoMixin
 from .smooth import SmoothEditor, SmoothStream
 from .utils import fmt_when, kb, parse_button_rows, parse_when
 
@@ -29,14 +32,16 @@ log = logging.getLogger(__name__)
 CB = "apb"  # callback namespace
 
 
-class Bot:
-    def __init__(self, api, store, admins=()):
+class Bot(PostoMixin):
+    def __init__(self, api, store, admins=(), ai=None):
         self.api = api
         self.store = store
         self.admins = list(admins) or list(store.data.get("admins", []))
         self.composers = {}   # chat_id -> composer state dict
         self.streams = {}     # chat_id -> SmoothStream
         self._lock = threading.RLock()
+        self.init_posto(ai or NVIDIA(
+            os.environ.get("APB_NVIDIA_KEY") or os.environ.get("NVIDIA_API_KEY")))
 
     # ================================================================ router
 
@@ -74,6 +79,9 @@ class Bot:
             self.route_command(text, msg)
             return
 
+        if chat_id is not None and self.posto_message(msg, chat_id):
+            return
+
         with self._lock:
             comp = self.composers.get(chat_id)
         if comp is not None:
@@ -97,6 +105,9 @@ class Bot:
             "broadcast": self.cmd_bcast, "edit": self.cmd_edit,
             "stream": self.cmd_stream, "stats": self.cmd_stats,
             "id": self.cmd_id, "ping": self.cmd_ping,
+            "channels": self.cmd_channels, "templates": self.cmd_templates,
+            "bulk": self.cmd_bulk, "turbo": self.cmd_turbo,
+            "slideshow": self.cmd_slideshow, "ai": self.cmd_ai,
         }
         handler = table.get(name)
         if handler is None:
@@ -158,12 +169,17 @@ class Bot:
             R.table(
                 [["Metric", "Value"],
                  ["Chats seen", s["chats"]],
+                 ["Channels", len(self.store.channels())],
+                 ["Templates", len(self.store.templates())],
                  ["Drafts", s["drafts"]],
-                 ["Scheduled", s["scheduled"]],
+                 ["Scheduled (incl. recurring)", s["scheduled"]],
                  ["Posts delivered", s["sent"]],
                  ["Failed sends", s["failed"]]],
                 aligns=["left", "right"], compact=True),
-            R.footer("stats live in data/apb.json"),
+            R.paragraph([R.code(self.ai.status_line())]),
+            R.footer("⚡ turbo {} · ©️ watermark {} · stats live in data/apb.json".format(
+                "on" if self.store.setting("turbo") else "off",
+                "on" if self.store.setting("watermark_on") else "off")),
         ]
         self.api.send_rich(msg["chat"]["id"], R.rich_message(blocks=blocks))
 
@@ -220,6 +236,10 @@ class Bot:
             "mode": "rich",
             "buttons": [],
             "effect": None,
+            "slideshow": False,
+            "stars": None,
+            "signature": "",
+            "backup_parts": None,
             "panel_msg": None,
             "panel_editor": None,
             "preview_msg": None,
@@ -230,6 +250,9 @@ class Bot:
     def feed_composer(self, chat_id, msg, comp):
         state = comp.get("state")
         text = (msg.get("text") or msg.get("caption") or "").strip()
+
+        if self.posto_composer_feed(comp, text, msg):
+            return
 
         if state == "content":
             media = self.extract_media(msg)
@@ -263,14 +286,7 @@ class Bot:
                     "⏰ Couldn't parse that. Try `+2h`, `21:30`, `tomorrow 09:00` "
                     "or `2026-12-25 10:00`."))
                 return
-            jid = self.store.add_scheduled(
-                when, comp.get("target") or {"kind": "here", "chat_id": chat_id},
-                self.composer_markdown(comp), mode=comp["mode"],
-                buttons=comp["buttons"], media=comp["media"],
-                note=self.composer_title(comp))
-            self.set_panel_state(comp, "published_panel")
-            self.update_panel(comp, extra="📅 Scheduled as job `{}` — {}.\n👀 `/schedule` to manage.".format(
-                jid, fmt_when(when)))
+            self.ask_repeat(comp, when)
             return
 
         if state == "await_buttons":
@@ -322,6 +338,8 @@ class Bot:
             return
         if comp["preview_msg"] is None:
             self.send_preview(comp)
+        if self.turbo_try_publish(comp):
+            return
         self.set_panel_state(comp, "published_panel")
         self.update_panel(comp)
 
@@ -351,6 +369,7 @@ class Bot:
             stream = self.streams.get(chat_id)
             if stream:
                 stream.abort(keep=False)
+        self.posto_cancel(chat_id)
 
     def cmd_stop(self, msg, args):
         stream = self.streams.get(msg["chat"]["id"])
@@ -382,9 +401,15 @@ class Bot:
         for jid, job in self.store.scheduled()[:8]:
             when = fmt_when(job["run_at"])
             status = "" if job.get("status") == "pending" else " · " + job.get("status", "")
-            lines.append("• `{}` — {}{} — {}".format(
-                jid, when, status, job.get("note") or job.get("target", {}).get("chat_id", "")))
-            rows.append([{"text": "🗑 cancel " + when[:16],
+            rep = job.get("repeat") or "none"
+            rep_txt = {"none": "", "hourly": " · 🔁 hourly", "daily": " · 🔁 daily",
+                       "weekly": " · 🔁 weekly"}.get(
+                           rep, " · 🔁 every {:g}h".format(float(rep.split(":")[1]) / 3600)
+                           if isinstance(rep, str) and rep.startswith("every:") else "")
+            lines.append("• `{}` — {}{}{} — {}".format(
+                jid, when, status, rep_txt,
+                job.get("note") or job.get("target", {}).get("chat_id", "")))
+            rows.append([{"text": ("⏹ end " if rep != "none" else "🗑 cancel ") + when[:16],
                           "callback_data": "{}:scheddel:{}".format(CB, jid),
                           "style": "danger"}])
         if not rows:
@@ -448,6 +473,9 @@ class Bot:
         chat_id = chat.get("id")
         user = cbq.get("from") or {}
         uid = user.get("id")
+
+        if action and self.posto_callback(cbq, parts, action):
+            return
 
         if action == "demo":
             self.api.answer_cbq(cbq["id"])
@@ -678,23 +706,61 @@ class Bot:
     def build_irm(self, comp):
         if comp.get("mode") == "plain":
             return None
+        if comp.get("slideshow") and comp.get("media"):
+            return self.build_slideshow_irm(comp)
         media = [R.media_ref(m["id"], m["media"], m["kind"]) for m in comp.get("media", [])]
         return R.rich_message(markdown=self.composer_markdown(comp), media=media or None)
 
-    def deliver_one(self, chat_id, comp, private=False):
-        """Send the composed post to one chat; returns the sent Message."""
+    def deliver_one(self, chat_id, comp, private=False, signature=None):
+        """Send the composed post to one chat; returns the sent Message.
+
+        Handles: paid (Stars) media posts, plain mode (with media group),
+        slideshow blocks mode, watermarked uploads, per-post/channel
+        signatures and private-chat message effects."""
         markup = kb(comp["buttons"]) if comp.get("buttons") else None
+        markdown = self.apply_signature(
+            self.composer_markdown(comp), signature or comp.get("signature"))
+        media = comp.get("media") or []
+
+        # ---- paid posts (sendPaidMedia, photo/video only) ----
+        if comp.get("stars") and media and all(
+                m["kind"] in ("photo", "video") for m in media):
+            return self.api.call(
+                "sendPaidMedia", chat_id=chat_id, star_count=comp["stars"],
+                media=[{"type": m["kind"], "media": m["media"]} for m in media],
+                caption=R.strip_markdown(markdown)[:1000] or None,
+                reply_markup=markup)
+
+        # ---- plain mode ----
         if comp.get("mode") == "plain":
-            return self.api.send_text(
-                chat_id, self.composer_markdown(comp),
-                parse_mode="Markdown", reply_markup=markup)
-        irm = self.build_irm(comp)
+            if media:
+                group = []
+                for i, m in enumerate(media):
+                    item = {"type": m["kind"], "media": m["media"]}
+                    if i == 0 and markdown:
+                        item["caption"] = markdown[:1000]
+                        item["parse_mode"] = "Markdown"
+                    group.append(item)
+                return self.api.call("sendMediaGroup", chat_id=chat_id, media=group)
+            return self.api.send_text(chat_id, markdown, parse_mode="Markdown",
+                                      reply_markup=markup)
+
+        # ---- rich mode ----
+        if comp.get("slideshow") and media:
+            irm = self.build_slideshow_irm(comp, markdown)
+            files = {}
+        else:
+            refs, files = self.prepare_media(comp)
+            irm = R.rich_message(markdown=markdown, media=refs or None)
         problems = R.check_limits(irm)
         if problems:
             raise ValueError("; ".join(problems))
         kw = {}
         if private and comp.get("effect"):
             kw["message_effect_id"] = content.EFFECTS.get(comp["effect"])
+        if files:
+            return self.api.send_rich_multipart(chat_id, irm, files,
+                                                reply_markup=markup, **kw)
         return self.api.send_rich(chat_id, irm, reply_markup=markup, **kw)
 
     def publish_to(self, comp, target):
@@ -753,15 +819,33 @@ class Bot:
 
     def deliver_scheduled(self, jid, job):
         """Entry point used by the scheduler thread."""
+        target = job.get("target") or {}
         comp = {
-            "chat_id": (job.get("target") or {}).get("chat_id"),
+            "chat_id": target.get("chat_id"),
             "parts": [job.get("markdown") or ""],
             "media": job.get("media") or [],
             "buttons": job.get("buttons") or [],
             "mode": job.get("mode", "rich"),
             "effect": None,
+            "slideshow": job.get("slideshow", False),
+            "stars": job.get("stars"),
+            "signature": "",
         }
-        target = job.get("target") or {}
+        if target.get("kind") == "channels":
+            ok = fail = 0
+            for cid, ch in self.store.channels().items():
+                try:
+                    self.deliver_one(int(cid), comp,
+                                     signature=ch.get("signature") or None)
+                    ok += 1
+                    self.store.bump(True)
+                except (TelegramError, ValueError) as exc:
+                    fail += 1
+                    log.warning("scheduled channel post to %s failed: %s", cid, exc)
+                time.sleep(1.1)
+            self.notify_admins("📅 Scheduled post `{}` → {} channels · "
+                               "✅ {} ❌ {}".format(jid, ok + fail, ok, fail))
+            return
         if target.get("kind") == "all":
             chats = self.store.chats()
             ok = fail = 0
@@ -792,25 +876,52 @@ class Bot:
 
     # ============================================================== panels
 
-    def compose_kb(self, state):
+    def compose_kb(self, state, comp=None):
         if state == "compose":
-            return kb([
+            rows = [
                 [{"text": "👁 Preview", "callback_data": CB + ":pv", "style": "primary"},
                  {"text": "✅ Done", "callback_data": CB + ":done", "style": "success"}],
+                [{"text": "🤖 AI write", "callback_data": CB + ":aiw", "style": "primary"},
+                 {"text": "♻️ Rewrite", "callback_data": CB + ":air"},
+                 {"text": "🌐 Translate", "callback_data": CB + ":ait"},
+                 {"text": "✂️ Shorten", "callback_data": CB + ":ais"},
+                 {"text": "➕ Expand", "callback_data": CB + ":aie"}],
                 [{"text": "🎨 Buttons", "callback_data": CB + ":btns"},
                  {"text": "💤 Mode: rich", "callback_data": CB + ":mode"}],
-                [{"text": "🚫 Cancel", "callback_data": CB + ":cancel", "style": "danger"}],
-            ])
-        return kb([
-            [{"text": "✅ Publish here", "callback_data": CB + ":pub:here", "style": "success"}],
-            [{"text": "📣 To channel…", "callback_data": CB + ":pub:chan", "style": "primary"},
-             {"text": "📤 Broadcast all", "callback_data": CB + ":pub:all", "style": "primary"}],
+            ]
+            if comp and comp.get("media"):
+                rows.append([
+                    {"text": "🎞 Slideshow: {}".format(
+                        "ON" if comp.get("slideshow") else "off"),
+                     "callback_data": CB + ":slide",
+                     "style": "success" if comp.get("slideshow") else None}])
+            rows.append([{"text": "🚫 Cancel", "callback_data": CB + ":cancel",
+                          "style": "danger"}])
+            return kb(rows)
+        rows = [
+            [{"text": "✅ Publish here", "callback_data": CB + ":pub:here",
+              "style": "success"},
+             {"text": "🌐 Channels ({})".format(len(self.store.channels())),
+              "callback_data": CB + ":pub:chans", "style": "primary"}],
+            [{"text": "📣 To channel…", "callback_data": CB + ":pub:chan",
+              "style": "primary"},
+             {"text": "📤 Broadcast all", "callback_data": CB + ":pub:all",
+              "style": "primary"}],
             [{"text": "📅 Schedule…", "callback_data": CB + ":sched"},
-             {"text": "🪄 Effect: off", "callback_data": CB + ":eff"},
-             {"text": "💾 Save draft", "callback_data": CB + ":save"}],
+             {"text": "🪄 Effect: {}".format(comp.get("effect") or "off") if comp
+              else "🪄 Effect", "callback_data": CB + ":eff"},
+             {"text": "💾 Save draft", "callback_data": CB + ":save"},
+             {"text": "📋 Template", "callback_data": CB + ":tplsave"}],
+            [{"text": "⭐ Paid…", "callback_data": CB + ":star"},
+             {"text": "🖋 Signature", "callback_data": CB + ":sign"},
+             {"text": "©️ Watermark: {}".format(
+                 "on" if self.store.setting("watermark_on") else "off"),
+              "callback_data": CB + ":wm"}],
             [{"text": "✏️ Keep editing", "callback_data": CB + ":resume"},
-             {"text": "🚫 Discard", "callback_data": CB + ":cancel", "style": "danger"}],
-        ])
+             {"text": "🚫 Discard", "callback_data": CB + ":cancel",
+              "style": "danger"}],
+        ]
+        return kb(rows)
 
     def published_kb(self):
         return kb([
@@ -833,6 +944,15 @@ class Bot:
         if comp.get("buttons"):
             lines.append("🔘 {} button row(s) · 🪄 effect: {}".format(
                 len(comp["buttons"]), comp.get("effect") or "off"))
+        if media:
+            lines.append("🎞 slideshow: **{}**".format(
+                "ON" if comp.get("slideshow") else "off"))
+        if comp.get("stars"):
+            lines.append("⭐ paid post: **{} Stars**".format(comp["stars"]))
+        if comp.get("signature"):
+            lines.append("🖋 signature: _{}_".format(comp["signature"]))
+        if self.store.setting("turbo"):
+            lines.append("⚡ turbo mode — /done publishes instantly")
         if comp["state"] == "await_buttons":
             lines.append("\n🔘 send button lines now (see above)")
         if extra:
@@ -846,10 +966,12 @@ class Bot:
         editor = comp.get("panel_editor")
         if editor is None:
             return
-        kb_state = "compose" if comp["state"] in ("content", "await_buttons") else "publish"
+        kb_state = "compose" if comp["state"] in ("content", "await_buttons",
+                                                  "await_ai_prompt",
+                                                  "await_ai_lang") else "publish"
         editor.update(
             rich_message=R.markdown_message(self.panel_md(comp, extra)),
-            reply_markup=keyboard or self.compose_kb(kb_state))
+            reply_markup=keyboard or self.compose_kb(kb_state, comp))
 
     def finish_panel(self, comp, text):
         editor = comp.get("panel_editor")

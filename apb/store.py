@@ -9,16 +9,104 @@ import threading
 import time
 
 
+class _Seq:
+    """Monotonic suffix so ids never collide inside the same millisecond."""
+
+    def __init__(self):
+        self._n = 0
+        self._lock = threading.Lock()
+
+    def next(self):
+        with self._lock:
+            self._n += 1
+            return self._n
+
+
+_SEQ = _Seq()
+
+
+def _new_id(prefix=""):
+    return "{}{}-{}".format(prefix, int(time.time() * 1000), _SEQ.next())
+
+
 class Store:
     """All state lives in one JSON file, written atomically."""
 
     DEFAULTS = {
         "chats": {},        # chat_id -> {"title", "type", "first_seen"}
         "drafts": {},       # draft_id -> {"title", "markdown", "mode", "buttons", "media", "created"}
-        "scheduled": {},    # job_id  -> {"run_at", "target", "markdown", "mode", "buttons", "media", "note", "status"}
+        "scheduled": {},    # job_id  -> {"run_at", "target", "markdown", "mode", "buttons", "media", "note", "status", "repeat"}
+        "channels": {},     # chat_id -> {"title", "signature", "delay", "added"}
+        "templates": {},    # tpl_id  -> {"name", "markdown", "buttons", "media", "signature", "created"}
+        "settings": {"turbo": False, "watermark_on": False, "watermark_text": ""},
         "sent": 0,
         "failed": 0,
     }
+
+    # ------------------------------------------------------- settings
+
+    def setting(self, key, default=None):
+        return self.data.get("settings", {}).get(key, default)
+
+    def set_setting(self, key, value):
+        with self._lock:
+            self.data.setdefault("settings", {})[key] = value
+            self.save()
+
+    # ------------------------------------------------------- channels
+
+    def add_channel(self, chat_id, title="", signature=None, delay=None):
+        with self._lock:
+            entry = self.data["channels"].setdefault(str(chat_id), {})
+            entry["title"] = title or entry.get("title", str(chat_id))
+            entry.setdefault("added", time.time())
+            if signature is not None:
+                entry["signature"] = signature
+            if delay is not None:
+                entry["delay"] = float(delay)
+            self.save()
+            return entry
+
+    def channel(self, chat_id):
+        return self.data["channels"].get(str(chat_id))
+
+    def channels(self):
+        return dict(self.data["channels"])
+
+    def del_channel(self, chat_id):
+        with self._lock:
+            if str(chat_id) in self.data["channels"]:
+                del self.data["channels"][str(chat_id)]
+                self.save()
+                return True
+            return False
+
+    # ------------------------------------------------------ templates
+
+    def add_template(self, name, markdown, buttons=None, media=None, signature=""):
+        with self._lock:
+            tid = _new_id("t")
+            self.data["templates"][tid] = {
+                "name": name, "markdown": markdown,
+                "buttons": buttons or [], "media": media or [],
+                "signature": signature or "", "created": time.time(),
+            }
+            self.save()
+            return tid
+
+    def templates(self):
+        return sorted(self.data["templates"].items(), key=lambda kv: -kv[1].get("created", 0))
+
+    def template(self, tid):
+        return self.data["templates"].get(str(tid))
+
+    def del_template(self, tid):
+        with self._lock:
+            if str(tid) in self.data["templates"]:
+                del self.data["templates"][str(tid)]
+                self.save()
+                return True
+            return False
 
     def __init__(self, path):
         self.path = path
@@ -73,7 +161,7 @@ class Store:
 
     def add_draft(self, title, markdown, mode="rich", buttons=None, media=None):
         with self._lock:
-            did = str(int(time.time() * 1000))
+            did = _new_id()
             self.data["drafts"][did] = {
                 "title": title,
                 "markdown": markdown,
@@ -102,9 +190,9 @@ class Store:
     # ------------------------------------------------------ scheduled
 
     def add_scheduled(self, run_at, target, markdown, mode="rich", buttons=None,
-                      media=None, note=""):
+                      media=None, note="", repeat="none", slideshow=False, stars=None):
         with self._lock:
-            jid = str(int(time.time() * 1000))
+            jid = _new_id()
             self.data["scheduled"][jid] = {
                 "run_at": run_at,
                 "target": target,
@@ -114,9 +202,45 @@ class Store:
                 "media": media or [],
                 "note": note,
                 "status": "pending",
+                "repeat": repeat,
+                "slideshow": bool(slideshow),
+                "stars": stars,
             }
             self.save()
             return jid
+
+    REPEAT_SECONDS = {"hourly": 3600, "daily": 86400, "weekly": 7 * 86400}
+
+    def repeat_interval(self, job):
+        rep = job.get("repeat") or "none"
+        if rep in self.REPEAT_SECONDS:
+            return self.REPEAT_SECONDS[rep]
+        if isinstance(rep, (int, float)) and rep > 0:
+            return rep
+        if isinstance(rep, str) and rep.startswith("every:"):
+            try:
+                return float(rep.split(":", 1)[1])
+            except ValueError:
+                return None
+        return None
+
+    def reschedule_recurring(self, jid, now=None):
+        """Advance a recurring job to its next run (no drift)."""
+        now = now or time.time()
+        with self._lock:
+            job = self.data["scheduled"].get(str(jid))
+            if job is None:
+                return False
+            interval = self.repeat_interval(job)
+            if not interval:
+                return False
+            nxt = job.get("run_at", now) + interval
+            while nxt <= now:               # catch up if we fell behind
+                nxt += interval
+            job["run_at"] = nxt
+            job["status"] = "pending"
+            self.save()
+            return True
 
     def due_scheduled(self, now=None):
         """Return and mark running all pending jobs whose time has come."""

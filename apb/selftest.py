@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import tempfile
-import threading
+# (threads are exercised via the handlers themselves)
 import time
 import urllib.error
 
@@ -338,6 +338,14 @@ class FlowAPI:
         self._rec(("ephemeral", chat_id, receiver_user_id, rich_message, kw))
         return {"message_id": 0, "ephemeral_message_id": 1}
 
+    def send_rich_multipart(self, chat_id, rich_message, files, **kw):
+        self._rec(("sendRichMessageMultipart", chat_id, rich_message, sorted(files), kw))
+        return self._msg(chat_id)
+
+    def download_file(self, file_id):
+        self._rec(("downloadFile", file_id))
+        return b"fakejpgbytes"
+
 
 def test_composer_flow():
     from .handlers import Bot
@@ -387,6 +395,8 @@ def test_composer_flow():
                         "from": {"id": 999, "is_bot": True}}}})
         t_before = time.time()
         bot.dispatch({"message": {"chat": chat, "from": user, "text": "+2h"}})
+        check("repeat prompt shown", comp2["state"] == "await_repeat", comp2["state"])
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "once"}})
         jobs = store.scheduled()
         check("schedule stored", len(jobs) == 1
               and jobs[0][1]["markdown"] == "Scheduled hello", jobs)
@@ -402,12 +412,458 @@ def test_composer_flow():
             s[0] == "sendRichMessage" and "delivered" in str(s[2]) for s in api.sent))
 
 
+# ------------------------------------------------------------ Posto
+
+class FakeAI:
+    model = "nvidia/nemotron-3-super-120b-a12b"
+    enabled = True
+
+    def status_line(self):
+        return "🤖 AI: test model"
+
+    def stream(self, prompt, **kw):
+        for w in ("Hello ", "**world** ", "from ", "NVIDIA"):
+            yield w
+
+    def complete(self, prompt, **kw):
+        return "Hello **world** from NVIDIA"
+
+    def write_post(self, p, tone=None, language=None):
+        return p
+
+    def rewrite_post(self, text, instruction=""):
+        return text
+
+    def translate_post(self, text, language):
+        return text
+
+    def shorten_post(self, text):
+        return text
+
+    def expand_post(self, text):
+        return text
+
+
+def wait_until(cond, timeout=15):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_mdblocks():
+    from .mdblocks import md_to_blocks
+    blocks = md_to_blocks("# Title\n\nHello **bold** and `code`\n\n- a\n- [x] done\n\n> quote")
+    kinds = [b["type"] for b in blocks]
+    check("mdblocks kinds", kinds == ["heading", "paragraph", "list", "blockquote"], kinds)
+    check("mdblocks inline bold", blocks[1]["text"] == ["Hello ",
+          {"type": "bold", "text": "bold"}, " and ",
+          {"type": "code", "text": "code"}], blocks[1]["text"])
+    check("mdblocks checklist", blocks[2]["items"][1]["is_checked"] is True)
+    blocks2 = md_to_blocks("```python\nprint(1)\n```\n\n---\n\n1. one\n2. two")
+    kinds2 = [b["type"] for b in blocks2]
+    check("mdblocks pre/divider/ordered", kinds2 == ["pre", "divider", "list"], kinds2)
+    check("mdblocks pre language", blocks2[0]["language"] == "python")
+    blocks3 = md_to_blocks("| a | b |\n|:-:|-:|\n| 1 | 2 |")
+    check("mdblocks table", blocks3[0]["type"] == "table"
+          and blocks3[0]["cells"][0][0]["align"] == "center"
+          and blocks3[0]["cells"][1][1]["align"] == "right", blocks3)
+
+
+def test_nvidia_client():
+    from .nvidia import NVIDIA, AIError
+
+    captured = {}
+
+    class FakeResp(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["auth"] = req.headers.get("Authorization")
+        captured["body"] = json.loads(req.data.decode())
+        if captured.get("mode") == "401":
+            import urllib.error
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized",
+                                         {}, io.BytesIO(b'{"message": "bad key"}'))
+        if captured.get("mode") == "stream":
+            payload = (b'data: {"choices":[{"delta":{"content":"Hi "}}]}\n\n'
+                       b'data: {"choices":[{"delta":{"content":"there"}}]}\n\n'
+                       b'data: [DONE]\n\n')
+            return FakeResp(payload)
+        return FakeResp(b'{"choices":[{"message":{"content":"full reply"}}]}')
+
+    import urllib.request as urlreq
+    orig = urlreq.urlopen
+    urlreq.urlopen = fake_urlopen
+    try:
+        ai = NVIDIA(api_key="nvapi-test")
+        check("nvidia default model", ai.model == "nvidia/nemotron-3-super-120b-a12b",
+              ai.model)
+        check("nvidia disabled without key", not NVIDIA().enabled)
+        out = ai.complete("write about tea")
+        check("nvidia complete", out == "full reply", out)
+        check("nvidia auth header", captured["auth"] == "Bearer nvapi-test")
+        check("nvidia payload model", captured["body"]["model"] == ai.model)
+        check("nvidia endpoint", captured["url"].endswith("/v1/chat/completions"))
+        captured["mode"] = "stream"
+        chunks = list(ai.stream("write about tea"))
+        check("nvidia sse stream", chunks == ["Hi ", "there"], chunks)
+        captured["mode"] = "401"
+        try:
+            ai.complete("x")
+            check("nvidia 401 friendly", False)
+        except AIError as exc:
+            check("nvidia 401 friendly", "key" in str(exc).lower(), str(exc))
+    finally:
+        urlreq.urlopen = orig
+
+
+def test_store_posto():
+    with tempfile.TemporaryDirectory() as tmp:
+        s = Store(os.path.join(tmp, "apb.json"))
+        check("settings default", s.setting("turbo") is False)
+        s.set_setting("turbo", True)
+        s.add_channel(-100123, "News", signature="@news", delay=5)
+        tid = s.add_template("Daily", "# Daily", buttons=[[{"text": "x",
+                                                            "callback_data": "y"}]])
+        s2 = Store(os.path.join(tmp, "apb.json"))
+        check("settings roundtrip", s2.setting("turbo") is True)
+        check("channel roundtrip", s2.channel(-100123)["signature"] == "@news"
+              and s2.channel(-100123)["delay"] == 5)
+        check("template roundtrip", s2.template(tid)["name"] == "Daily")
+        s2.del_channel(-100123)
+        check("channel delete", s2.channels() == {})
+
+        # recurring math
+        now = time.time()
+        jid = s2.add_scheduled(now - 10, {"kind": "here", "chat_id": 1}, "x",
+                               repeat="daily")
+        job = s2.scheduled()[0][1]
+        check("repeat_interval daily", s2.repeat_interval(job) == 86400)
+        check("reschedule advances", s2.reschedule_recurring(jid, now=now) is True)
+        job = s2.scheduled()[0][1]
+        check("rescheduled future", now < job["run_at"] <= now + 86400 + 1)
+        check("rescheduled pending", job["status"] == "pending")
+        jid2 = s2.add_scheduled(now, {"kind": "here", "chat_id": 1}, "y",
+                                repeat="every:3600")
+        job2 = [j for jid, j in s2.scheduled() if jid == jid2][0]
+        check("repeat_interval custom", s2.repeat_interval(job2) == 3600,
+              job2.get("repeat"))
+
+
+def test_scheduler_recurring():
+    from .handlers import Bot
+    api = FlowAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(os.path.join(tmp, "apb.json"))
+        bot = Bot(api, store, admins=[1], ai=FakeAI())
+        now = time.time()
+        jid = store.add_scheduled(now - 5, {"kind": "here", "chat_id": 55},
+                                  "rec post", repeat="hourly")
+        jid2 = store.add_scheduled(now - 5, {"kind": "channels"}, "chan post",
+                                   repeat="none")
+        store.add_channel(-100, "Chan A", signature="@a")
+        store.add_channel(-200, "Chan B")
+        for j, job in store.due_scheduled():
+            bot.deliver_scheduled(j, job)
+            if not store.reschedule_recurring(j):
+                store.finish_scheduled(j, ok=True)
+        remaining = dict(store.scheduled())
+        check("recurring job survives", jid in remaining, list(remaining))
+        check("recurring rescheduled", remaining[jid]["run_at"] > now)
+        check("one-shot removed", jid2 not in remaining)
+        chans = [x for x in api.sent if x[0] == "sendRichMessage"
+                 and "chan post" in str(x[2])]
+        check("channels fan-out", len(chans) == 2, len(chans))
+        sig = [x for x in api.sent if "@a" in str(x[2])]
+        check("channel signature applied", len(sig) == 1, len(sig))
+
+
+def test_ai_flow():
+    from .handlers import Bot
+    api = FlowAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(os.path.join(tmp, "apb.json"))
+        bot = Bot(api, store, admins=[1], ai=FakeAI())
+        chat = {"id": 55, "type": "private"}
+        user = {"id": 1, "is_bot": False}
+
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/post"}})
+        bot.dispatch({"message": {"chat": chat, "from": user,
+                                  "text": "original draft content"}})
+        comp = bot.composers[55]
+
+        bot.dispatch({"callback_query": {
+            "id": "cq1", "from": user, "data": "apb:aiw",
+            "message": {"chat": chat, "message_id": comp["panel_msg"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        check("ai write prompts for topic", comp["state"] == "await_ai_prompt",
+              comp["state"])
+        bot.dispatch({"message": {"chat": chat, "from": user,
+                                  "text": "why bots are cool"}})
+        ok = wait_until(lambda: 55 in bot.ai_results, timeout=10)
+        check("ai streamed result", ok and
+              bot.ai_results[55]["text"] == "Hello **world** from NVIDIA",
+              bot.ai_results.get(55))
+        check("ai used draft animation", any(
+            s[0] == "sendRichMessageDraft" for s in api.sent))
+        status = bot.ai_use(55)
+        check("ai use loaded", status == "loaded" and
+              "NVIDIA" in comp["parts"][-1], (status, comp["parts"]))
+        check("ai write appends", comp["parts"][0] == "original draft content")
+
+        # rewrite (replace=True) keeps a backup
+        bot.dispatch({"callback_query": {
+            "id": "cq2", "from": user, "data": "apb:air",
+            "message": {"chat": chat, "message_id": comp["panel_msg"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        ok = wait_until(lambda: 55 in bot.ai_results, timeout=10)
+        bot.ai_use(55)
+        check("ai rewrite replaces + backup", comp["parts"] == [
+            "Hello **world** from NVIDIA"]
+            and comp["backup_parts"][0] == "original draft content",
+            (comp["parts"], comp.get("backup_parts")))
+
+        # AI off -> hint instead of crash
+        bot.ai.enabled = False
+        state = bot.ai_action(55, "rewrite")
+        check("ai disabled hint", state is None and
+              any("build.nvidia.com" in str(s) for s in api.sent))
+        bot.ai.enabled = True
+
+
+def test_bulk_flow():
+    from .handlers import Bot
+    api = FlowAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(os.path.join(tmp, "apb.json"))
+        bot = Bot(api, store, admins=[1], ai=FakeAI())
+        chat = {"id": 55, "type": "private"}
+        user = {"id": 1, "is_bot": False}
+
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/bulk"}})
+        check("bulk session", 55 in bot.bulks)
+        for i in range(3):
+            bot.dispatch({"message": {"chat": chat, "from": user,
+                                      "text": "bulk post {}".format(i)}})
+        bulk = bot.bulks[55]
+        check("bulk collected", len(bulk["items"]) == 3, len(bulk["items"]))
+        # album grouping: same media_group_id merges
+        bot.dispatch({"message": {"chat": chat, "from": user, "caption": "album",
+                                  "photo": [{"file_id": "f1"}],
+                                  "media_group_id": "g1"}})
+        bot.dispatch({"message": {"chat": chat, "from": user,
+                                  "photo": [{"file_id": "f2"}],
+                                  "media_group_id": "g1"}})
+        check("bulk album merged", len(bulk["items"]) == 4
+              and len(bulk["items"][-1]["media"]) == 2,
+              (len(bulk["items"]), bulk["items"][-1]["media"]))
+
+        bot.dispatch({"callback_query": {
+            "id": "cq1", "from": user, "data": "apb:bulkgo",
+            "message": {"chat": chat, "message_id": bulk["panel"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        bot.dispatch({"callback_query": {
+            "id": "cq2", "from": user, "data": "apb:bulk:here",
+            "message": {"chat": chat, "message_id": bulk["panel"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        ok = wait_until(lambda: 55 not in bot.bulks, timeout=30)
+        check("bulk finished", ok)
+        posts = [s for s in api.sent if s[0] == "sendRichMessage"
+                 and "bulk post" in str(s[2])]
+        check("bulk delivered all", len(posts) == 3, len(posts))
+        albums = [s for s in api.sent if s[0] == "sendRichMessage"
+                  and "media" in s[2]]
+        check("bulk album delivered rich", len(albums) == 1, len(albums))
+
+        # auto-schedule path
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/bulk"}})
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "sched me"}})
+        bulk2 = bot.bulks[55]
+        bot.dispatch({"callback_query": {
+            "id": "cq3", "from": user, "data": "apb:bulksched:here",
+            "message": {"chat": chat, "message_id": bulk2["panel"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "2h"}})
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "now"}})
+        jobs = store.scheduled()
+        check("bulk autoscheduled", len(jobs) == 1
+              and jobs[0][1]["markdown"] == "sched me", jobs)
+
+
+def test_slideshow_and_paid():
+    from .handlers import Bot
+    api = FlowAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(os.path.join(tmp, "apb.json"))
+        bot = Bot(api, store, admins=[1], ai=FakeAI())
+
+        comp = bot._new_composer(55)
+        comp["parts"] = ["# Trip"]
+        comp["media"] = [
+            {"id": "m1", "kind": "photo", "media": "F1"},
+            {"id": "m2", "kind": "photo", "media": "F2"},
+        ]
+        comp["slideshow"] = True
+        irm = bot.build_irm(comp)
+        check("slideshow blocks mode", "blocks" in irm and
+              irm["blocks"][0]["type"] == "slideshow", list(irm))
+        check("slideshow has photos", len(irm["blocks"][0]["blocks"]) == 2)
+        check("slideshow keeps text", any(b["type"] == "heading" for b in irm["blocks"]))
+        check("slideshow within limits", R.check_limits(irm) == [])
+
+        bot.deliver_one(55, comp)
+        check("slideshow delivered as blocks", any(
+            s[0] == "sendRichMessage" and "blocks" in s[2] for s in api.sent))
+
+        comp2 = bot._new_composer(55)
+        comp2["parts"] = ["exclusive pics"]
+        comp2["media"] = [{"id": "m1", "kind": "photo", "media": "F1"}]
+        comp2["stars"] = 25
+        bot.deliver_one(55, comp2)
+        paid = [s for s in api.sent if s[0] == "sendPaidMedia"]
+        check("paid post sent", len(paid) == 1 and paid[0][1]["star_count"] == 25,
+              paid)
+
+        comp3 = bot._new_composer(55)
+        comp3["parts"] = ["plain mode with media"]
+        comp3["media"] = [{"id": "m1", "kind": "photo", "media": "F1"}]
+        comp3["mode"] = "plain"
+        bot.deliver_one(55, comp3)
+        mg = [s for s in api.sent if s[0] == "sendMediaGroup"]
+        check("plain mode media group", len(mg) == 1 and
+              mg[0][1]["media"][0]["caption"] == "plain mode with media", mg)
+
+        comp4 = bot._new_composer(55)
+        comp4["parts"] = ["signed post"]
+        bot.deliver_one(55, comp4, signature="@mychan")
+        check("signature appended", any(
+            s[0] == "sendRichMessage" and "@mychan" in s[2].get("markdown", "")
+            for s in api.sent))
+
+
+def test_channels_and_templates_flow():
+    from .handlers import Bot
+    api = FlowAPI()
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Store(os.path.join(tmp, "apb.json"))
+        bot = Bot(api, store, admins=[1], ai=FakeAI())
+        chat = {"id": 55, "type": "private"}
+        user = {"id": 1, "is_bot": False}
+
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/channels"}})
+        bot.dispatch({"callback_query": {
+            "id": "cq1", "from": user, "data": "apb:chadd",
+            "message": {"chat": chat, "message_id": 1,
+                        "from": {"id": 9, "is_bot": True}}}})
+        bot.dispatch({"message": {"chat": chat, "from": user,
+                                  "forward_from_chat": {"id": -100777,
+                                                        "title": "My Channel"},
+                                  "text": "fwd"}})
+        check("channel added by forward", -100777 in
+              [int(c) for c in store.channels()], list(store.channels()))
+
+        # templates
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/post"}})
+        comp = bot.composers[55]
+        bot.dispatch({"message": {"chat": chat, "from": user,
+                                  "text": "# Template post"}})
+        bot.dispatch({"callback_query": {
+            "id": "cq2", "from": user, "data": "apb:tplsave",
+            "message": {"chat": chat, "message_id": comp["panel_msg"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        tpls = store.templates()
+        check("template saved", len(tpls) == 1
+              and "Template post" in tpls[0][1]["markdown"], tpls)
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/cancel"}})
+
+        bot.dispatch({"callback_query": {
+            "id": "cq3", "from": user, "data": "apb:tplnew:" + tpls[0][0],
+            "message": {"chat": chat, "message_id": 1,
+                        "from": {"id": 9, "is_bot": True}}}})
+        comp2 = bot.composers.get(55)
+        check("template loads into composer", comp2 is not None
+              and "Template post" in comp2["parts"][0])
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/cancel"}})
+
+        # publish to channels
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/post"}})
+        comp3 = bot.composers[55]
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "fan out"}})
+        bot.dispatch({"callback_query": {
+            "id": "cq4", "from": user, "data": "apb:done",
+            "message": {"chat": chat, "message_id": comp3["panel_msg"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        bot.dispatch({"callback_query": {
+            "id": "cq5", "from": user, "data": "apb:pub:chans",
+            "message": {"chat": chat, "message_id": comp3["panel_msg"],
+                        "from": {"id": 9, "is_bot": True}}}})
+        ok = wait_until(lambda: store.stats()["sent"] == 1, timeout=15)
+        check("publish to channels delivered", ok and any(
+            s[0] == "sendRichMessage" and "fan out" in str(s[2]) and s[1] == -100777
+            for s in api.sent), store.stats())
+
+        # turbo mode
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/turbo"}})
+        check("turbo on", store.setting("turbo") is True)
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/post"}})
+        comp4 = bot.composers[55]
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "turbo post"}})
+        bot.dispatch({"message": {"chat": chat, "from": user, "text": "/done"}})
+        ok = wait_until(lambda: store.stats()["sent"] == 2, timeout=15)
+        check("turbo publishes instantly", ok and any(
+            len(s) > 2 and "turbo post" in str(s[2]) and s[1] == -100777
+            for s in api.sent))
+
+
+def test_watermark_module():
+    from . import watermark
+    check("watermark availability flag", isinstance(watermark.available(), bool))
+    if watermark.available():
+        # 10x10 red PNG -> watermarked JPEG
+        import struct, zlib
+        def chunk(tag, data):
+            c = tag + data
+            return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+        ihdr = struct.pack(">IIBBBBB", 10, 10, 8, 2, 0, 0, 0)
+        raw = b"".join(b"\x00" + b"\xff\x00\x00" * 10 for _ in range(10))
+        png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+               + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+        out = watermark.watermark_bytes(png, "@test")
+        check("watermark produces jpeg", out is not None and
+              out[:2] == b"\xff\xd8", type(out))
+    else:
+        check("watermark graceful without PIL", True)
+
+
+def test_parse_interval():
+    from .utils import parse_interval
+    check("interval 6h", parse_interval("6h") == 21600)
+    check("interval every 90m", parse_interval("every 90m") == 5400)
+    check("interval 2d", parse_interval("2d") == 172800)
+    check("interval 45 (minutes)", parse_interval("45") == 2700)
+    check("interval 1d12h", parse_interval("1d12h") == 129600)
+    check("interval too small", parse_interval("30s") is None)
+    check("interval garbage", parse_interval("whenever") is None)
+
+
 def run():
     print("Advanced Posting Bot — selftest\n")
     t0 = time.time()
     for fn in (test_richtext, test_blocks, test_rich_message, test_analysis,
                test_parse_when, test_parse_buttons, test_smooth_editor,
-               test_api_payload, test_store, test_content, test_composer_flow):
+               test_api_payload, test_store, test_content, test_composer_flow,
+               test_mdblocks, test_nvidia_client, test_store_posto,
+               test_scheduler_recurring, test_ai_flow, test_bulk_flow,
+               test_slideshow_and_paid, test_channels_and_templates_flow,
+               test_watermark_module, test_parse_interval):
         print("· {}".format(fn.__name__))
         fn()
     dt = time.time() - t0

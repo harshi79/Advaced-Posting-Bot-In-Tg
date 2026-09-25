@@ -24,10 +24,14 @@ class Scheduler(threading.Thread):
         while not self._stop.is_set():
             try:
                 for jid, job in self.store.due_scheduled():
-                    log.info("publishing scheduled job %s", jid)
+                    log.info("publishing scheduled job %s (repeat=%s)",
+                             jid, job.get("repeat", "none"))
                     try:
                         self.publish_fn(jid, job)
-                        self.store.finish_scheduled(jid, ok=True)
+                        if self.store.reschedule_recurring(jid):
+                            log.info("job %s rescheduled", jid)
+                        else:
+                            self.store.finish_scheduled(jid, ok=True)
                     except Exception as exc:
                         log.error("scheduled job %s failed: %s", jid, exc)
                         self.store.finish_scheduled(jid, ok=False, error=str(exc))

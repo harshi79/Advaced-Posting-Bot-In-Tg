@@ -169,6 +169,28 @@ class Telegram:
         """sendRichMessage — rich_message is an InputRichMessage dict."""
         return self.call("sendRichMessage", chat_id=chat_id, rich_message=rich_message, **kw)
 
+    def send_rich_multipart(self, chat_id, rich_message, files, **kw):
+        """sendRichMessage with file uploads (``attach://<name>`` media)."""
+        return self.call_multipart(
+            "sendRichMessage", files, chat_id=chat_id, rich_message=rich_message, **kw)
+
+    def download_file(self, file_id):
+        """getFile + download -> raw bytes (used for watermarking photos)."""
+        info = self.call("getFile", file_id=file_id)
+        path = info.get("file_path")
+        if not path:
+            raise TelegramError("getFile", "no file_path returned", -1)
+        url = "{}/file/bot{}/{}".format(self.base, self.token, path)
+        last_exc = None
+        for _ in range(self.max_retries + 1):
+            try:
+                with urllib.request.urlopen(url, timeout=self.timeout) as resp:
+                    return resp.read()
+            except (urllib.error.URLError, OSError) as exc:
+                last_exc = exc
+                time.sleep(1)
+        raise TelegramError("download", str(last_exc), -1)
+
     def edit_rich(self, chat_id, message_id, rich_message, **kw):
         """editMessageText with rich_message (text/rich_message are exclusive)."""
         return self.call(

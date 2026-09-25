@@ -74,6 +74,24 @@ def fmt_when(epoch):
     return datetime.datetime.fromtimestamp(epoch).strftime("%a %d %b %Y, %H:%M")
 
 
+def parse_interval(text):
+    """Parse a repeat/spacing interval into seconds.
+
+    Accepts ``6h``, ``every 6h``, ``90m``, ``2d``, ``30s``, ``45`` (minutes).
+    Returns int seconds or None.
+    """
+    s = (text or "").strip().lower().removeprefix("every").strip()
+    if s.isdigit():                       # bare number = minutes
+        total = int(s) * 60
+        return total if total >= 60 else None
+    m = re.fullmatch(r"(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*(?:(\d+)\s*s)?", s)
+    if m and any(m.groups()):
+        d, h, mi, se = (int(x) if x else 0 for x in m.groups())
+        total = d * 86400 + h * 3600 + mi * 60 + se
+        return total if total >= 60 else None  # one minute minimum
+    return None
+
+
 def parse_button_rows(text):
     """Parse the /buttons mini-language into reply-markup rows.
 

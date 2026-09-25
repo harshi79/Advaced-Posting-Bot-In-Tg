@@ -14,7 +14,60 @@ Full changelog: <https://core.telegram.org/bots/api-changelog>
 
 ---
 
-## Version-by-version read-through
+## Part 2 — @PostoRobot feature research
+
+Posto ("Automate multi-channel posts with recurring, bulk posting, buttons,
+AI & more", ~100k monthly users) was researched from its public listings and
+implanted feature-by-feature:
+
+| Posto feature | Research finding | Implantation |
+| :- | :- | :- |
+| Multi-channel publishing | "write once, post everywhere; each channel gets its own timing, links, buttons" | `/channels` (add by forward/@username, per-channel signature + delay), 🌐 publish with live progress |
+| Scheduled posts | natural scheduling | `parse_when()`: `+90m`, `21:30`, `tomorrow 09:00`, absolute dates |
+| **Recurring** | repeat posts | `repeat` field on jobs (hourly/daily/weekly/`every:Ns`), drift-free `reschedule_recurring()`, ⏹ end buttons |
+| **Bulk posting** | "forward a hundred posts and they'll be scheduled instantly" | `/bulk` collector (albums merged via `media_group_id`), post-all-now or auto-schedule at `start + i*interval` |
+| Templates | repeating formats with buttons/signature | `/templates` + composer 📋 save (markdown, buttons, media, signature) |
+| Buttons | inline buttons | `/buttons` + `InlineKeyboardButton.style` colors (9.4, free) |
+| AI (GPT) | "rewrite or translate text, generate new content" | NVIDIA NIM (see below) — write/rewrite/translate/shorten/expand, streaming |
+| Watermarks | photo/video watermarks | optional Pillow watermark re-uploaded via `attach://` multipart; signature fallback |
+| Slideshow generator | albums → slideshows | 🎞 toggle + `/slideshow`; blocks-mode `tg-slideshow` with file_id media |
+| Turbo Mode | "instant bulk operations without extra clicks" | `/turbo` — `/done` publishes instantly |
+| Hidden text | | `||spoilers||` (free Rich Markdown) |
+| Premium emojis | | **skipped** — only Premium-gated API feature |
+| Paid posts | monetize content | ⭐ Stars via `sendPaidMedia` (7.4), experimental |
+| Image quizzes | | not implanted (poll-media specifics unverified, low value here) |
+
+## Part 3 — NVIDIA NIM (the AI backend)
+
+Requirement: *AI by NVIDIA only, one latest good model, free forever, nothing
+paid.*
+
+**NVIDIA NIM / build.nvidia.com** fits exactly:
+
+- **Free permanent API key** (`nvapi-...`), **no credit card**, no expiring
+  credits; the free tier is rate-limited at **~40 requests/minute**.
+- OpenAI-compatible: `https://integrate.api.nvidia.com/v1/chat/completions`
+  (works with plain `urllib` — no SDK needed).
+- Hosts NVIDIA's own latest open models plus Meta/DeepSeek/Qwen etc.
+
+**Chosen model (the ONE): `nvidia/nemotron-3-super-120b-a12b`**
+
+Why this one:
+- NVIDIA's **own** current flagship generation (Nemotron 3, hybrid
+  Mamba-Transformer MoE) — not an outdated Llama-3-era model like
+  `llama-3.3-nemotron-super-49b-v1.5` (Oct 2025).
+- Huge **~1M context**, ~120B total / ~12B active params → **fast** replies,
+  ideal for a chat bot on a 40 RPM budget.
+- The bigger `nemotron-3-ultra-550b-a55b` also works (override with
+  `APB_AI_MODEL`) but is slower per token for short-form writing.
+
+Sources: build.nvidia.com (keys/models), freellmapi.co NVIDIA free-tier
+listing (nemotron-3-super-120b-a12b @ 40 RPM), free-model.com NIM key guide,
+uygarduzgun.com NIM model roundup (July 2026).
+
+---
+
+## Part 1 — Version-by-version read-through
 
 ### Bot API 9.1 — July 3, 2025
 - Native **checklists** (`Checklist`, `ChecklistTask`, `InputChecklist*`) — create/edit via business bots; detect progress via service messages.

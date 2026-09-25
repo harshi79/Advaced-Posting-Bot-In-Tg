@@ -19,7 +19,6 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from apb import __version__  # noqa: E402
 from apb.api import Telegram  # noqa: E402
 from apb.handlers import Bot  # noqa: E402
 from apb.scheduler import Scheduler  # noqa: E402
@@ -89,7 +88,8 @@ def main(argv=None):
     print("Admins: {} · chats seen: {} · scheduled: {}".format(
         bot.admins or "(first /post claims it)", len(store.chats()),
         len(store.data.get("scheduled", {}))))
-    print("Try /demo, /post, /stream — Ctrl+C to stop.\n")
+    print(bot.ai.status_line())
+    print("Try /demo, /post, /bulk, /channels, /ai — Ctrl+C to stop.\n")
 
     allowed = ["message", "callback_query", "stopped_message_generation"]
     try:

@@ -70,61 +70,86 @@ def welcome_blocks(username=""):
 
 
 def help_markdown():
-    return """\
-## 📘 Commands
+    return """\\
+## \U0001F4D8 Commands
 
 | Command | What it does |
 | :- | :- |
 | `/demo` | full Rich Message showcase (blocks mode) |
-| `/post` | ✍️ compose a new post (admins) |
-| `/stream` | 🔁 live-typing / smooth-editing demo |
-| `/drafts` | saved drafts |
-| `/schedule` | queued posts |
-| `/stats` | delivery stats table |
-| `/id` | this chat's id (ephemeral in groups!) |
-| `/cancel` | abort whatever is in progress |
+| `/post` | \U0001F58D\uFE0F compose a new post (admins) |
+| `/bulk` | \U0001F4E6 bulk posting \u2014 collect many, post all or auto-schedule |
+| `/channels` | \U0001F310 manage your channels (signature + delay each) |
+| `/templates` | \U0001F4CB reusable post formats |
+| `/turbo` | \u26A1 toggle zero-click publishing |
+| `/slideshow` | \U0001F39E build a slideshow from an album |
+| `/ai <topic>` | \U0001F916 NVIDIA-powered writing (free forever) |
+| `/stream` | \U0001F501 live-typing / smooth-editing demo |
+| `/drafts` `/schedule` | drafts \u00b7 scheduled & **recurring** posts |
+| `/stats` `/id` `/ping` | stats \u00b7 ids (ephemeral in groups!) |
+| `/edit` `/cancel` | re-type a message live \u00b7 abort anything |
 
 <details>
-<summary>✍️ Composing — the fun part</summary>
+<summary>\U0001F58D\uFE0F Composing \u2014 the fun part</summary>
 
-1. `/post` — then just send Markdown, as many messages as you like.
+1. `/post` \u2014 then just send Markdown, as many messages as you like.
 2. Rich Markdown is GitHub-Flavored: headings, **bold**, ==marked==, ||spoilers||,
    tables, task lists, footnotes[^1], and code blocks all work.
-3. Arbitrary rich HTML also works: `<details>`, `<aside>Pull quote<cite>credit</cite></aside>`,
-   `<tg-map lat="41.9" long="12.5" zoom="14"/>`, `<tg-collage>`, `<tg-slideshow>`…
-4. Attach media by sending a photo/video/audio/animation while composing — the bot
-   saves it and tells you the `tg://photo?id=…` link to paste.
+3. Rich HTML also works: `<details>`, `<aside>Pull quote<cite>credit</cite></aside>`,
+   `<tg-map lat="41.9" long="12.5" zoom="14"/>`, `<tg-collage>`, `<tg-slideshow>`\u2026
+4. Attach media by sending a photo/video/audio/animation while composing \u2014 the bot
+   saves it and gives you the `tg://photo?id=\u2026` link. Send an album and toggle
+   \U0001F39E **Slideshow** to render it as one slideshow.
 5. `/buttons` adds a colored action bar (blue `primary`, green `success`, red `danger`).
-6. `/preview` renders the post right in the chat. Keep editing — **the preview
+6. `/preview` renders the post right in the chat. Keep editing \u2014 **the preview
    updates itself, smoothly.**
+7. \U0001F916 AI buttons: **write** from a topic, **rewrite**, **translate**,
+   **shorten**, **expand** \u2014 output streams in live, then loads into your post.
 
 [^1]: Like this one. Tappable footnotes, for free.
 </details>
 
 <details>
-<summary>📤 Publishing</summary>
+<summary>\U0001F4E4 Publishing</summary>
 
-- **Here** — publish to the current chat.
-- **Channel** — give an `@username` or numeric id where the bot is admin.
-- **Everyone** — broadcast to all chats that ever `/start`ed the bot, with
-  progress live-edited into the status panel.
-- **Schedule** — natural times: `+2h`, `21:30`, `tomorrow 09:00`, `2026-12-25 10:00`.
+- **Here** \u2014 publish to the current chat.
+- **\U0001F310 Channels** \u2014 fan out to every saved channel, each with its own
+  **signature** and **delay** (`/channels`).
+- **\U0001F4E3 Channel** \u2014 a one-off `@username`/id where the bot is admin.
+- **\U0001F4E4 Everyone** \u2014 broadcast to all chats that ever `/start`ed the bot.
+- **\U0001F4C5 Schedule** \u2014 natural times (`+2h`, `21:30`, `tomorrow 09:00`)
+  plus a **repeat**: hourly / daily / weekly / custom (`every 6h`).
+- **\u2B50 Paid** \u2014 sell a photo/video post for Telegram Stars (experimental).
+- **\u26A1 Turbo** (`/turbo`) \u2014 `/done` publishes instantly, no clicks.
+- **\U0001F4E6 Bulk** (`/bulk`) \u2014 send 100 posts, post them all now or
+  auto-schedule them spread over time.
 </details>
 
 <details>
-<summary>🛠 Under the hood</summary>
+<summary>\U0001F916 AI \u2014 NVIDIA NIM, free forever</summary>
 
-- Pure Python 3 stdlib — talks raw HTTPS to the Bot API, no frameworks.
-- Rich Messages: `sendRichMessage` · `editMessageText(rich_message=…)`.
+One model, NVIDIA's own latest flagship generation:
+`nvidia/nemotron-3-super-120b-a12b` on **build.nvidia.com**'s free tier \u2014
+no credit card, no expiry, ~40 requests/minute.
+
+Setup: grab a `nvapi-\u2026` key at build.nvidia.com, then
+`export APB_NVIDIA_KEY=\u2026` and restart the bot.
+</details>
+
+<details>
+<summary>\U0001F6E0 Under the hood</summary>
+
+- Pure Python 3 stdlib \u2014 talks raw HTTPS to the Bot API, no frameworks.
+- Rich Messages: `sendRichMessage` \u00b7 `editMessageText(rich_message=\u2026)`.
 - Smooth streaming: `sendRichMessageDraft` with a stable `draft_id`
   (Telegram animates the change) + the shimmering `thinking` block.
 - Ephemeral group replies via `ephemeral_message_parameters`.
 - Colored buttons via `InlineKeyboardButton.style` / `RichMessageButton.style`.
+- Recurring jobs survive restarts (data/apb.json).
 </details>
 
 ---
 
-*Made with ❤ and zero dependencies.*"""
+*Made with \u2764 and zero dependencies.*"""
 
 
 def demo_blocks():
