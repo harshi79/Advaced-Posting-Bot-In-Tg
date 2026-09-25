@@ -158,3 +158,11 @@ rendering; old clients get degraded/plain text.
 - Rich-message canonical spec mirror — github.com/serejaris/telegram-skills `reference/rich-messages-spec.md`
 - Library upgrade notes: python-telegram-bot #5261, go-telegram/bot CHANGELOG (v1.22.0), luzrain/telegram-bot-api PR #10 (10.3), phptg/bot-api releases, vendelieu/telegram-bot 9.6.0, yagop/node-telegram-bot-api v1.1.0
 - Message effect IDs — gist.github.com/wiz0u/2a6d40c8f635687be363d72251a264da (via Stack Overflow)
+
+**Caveat (fixed in 2.0.1):** effect ids are undocumented and Telegram rotates
+them. The ❤️ id `5044134455711629726` (copied from the gist above) started
+answering `400 Bad Request: EFFECT_ID_INVALID`, which made `/start` fail before it
+could deliver the welcome. The current ❤️ id is `5159385139981059251`, the table
+also carries 💩 `5046589136895476101`, and `src/telegram.js` now blacklists any id
+Telegram rejects and retries the send without the effect. Override the table with
+`APB_EFFECT_IDS` when Telegram rotates the next one.

@@ -8,14 +8,65 @@
 import * as R from './rich.js';
 import { kb } from './utils.js';
 
-/** Free private-chat message effects (Bot API 7.2 — still free in 10.3). */
+/**
+ * Free private-chat message effects (Bot API 7.2 — still free in 10.3).
+ *
+ * Telegram never documented these ids and rotates them over time: the original
+ * ❤️ id (`5044134455711629726`) now answers `400 EFFECT_ID_INVALID`; the current
+ * one is `5159385139981059251`. Any entry below can go stale the same way, so
+ * src/telegram.js blacklists ids Telegram rejects and re-sends the message
+ * without the effect instead of failing the send.
+ *
+ * Overridable at runtime without a code change:
+ *   APB_EFFECT_IDS='{"❤️":"5159385139981059251"}'
+ * or `settings.effect_ids` in data/apb.json.
+ */
 export const EFFECTS = {
   '🔥': '5104841245755180586',
   '👍': '5107584321108051014',
-  '❤️': '5044134455711629726',
+  '❤️': '5159385139981059251',
   '🎉': '5046509860389126442',
   '👎': '5104858069142078462',
+  '💩': '5046589136895476101',
 };
+
+/** Parse `APB_EFFECT_IDS` once per distinct value (tests may change the env). */
+let envRaw = null;
+let envCache = {};
+function envEffectIds() {
+  const raw = process.env.APB_EFFECT_IDS || '';
+  if (raw === envRaw) return envCache;
+  envRaw = raw;
+  envCache = {};
+  if (raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') envCache = parsed;
+    } catch {
+      // A malformed override must never break sending — ignore it.
+    }
+  }
+  return envCache;
+}
+
+function cleanId(value) {
+  return (typeof value === 'string' && /^\d{4,}$/.test(value.trim())) ? value.trim() : null;
+}
+
+/**
+ * Resolve `emoji` to a usable effect id, or null when the table has nothing
+ * valid for it. Overrides win over the built-in table; invalid overrides fall
+ * back to it (a typo in a config var must not disable effects).
+ */
+export function effectId(emoji, overrides = null) {
+  for (const source of [overrides, envEffectIds(), EFFECTS]) {
+    if (!source || typeof source !== 'object') continue;
+    if (!Object.prototype.hasOwnProperty.call(source, emoji)) continue;
+    const id = cleanId(source[emoji]);
+    if (id) return id;
+  }
+  return null;
+}
 
 export const STREAM_TEXT = '🚀 Breaking: this bot just learned to type.\n\n'
   + 'Every word you see appearing here is being edited into the message in real '
