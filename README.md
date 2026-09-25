@@ -34,12 +34,36 @@ export APB_NVIDIA_KEY="nvapi-..."
 # 3. run (Python 3.9+, nothing to install!)
 python3 bot.py
 
-# offline sanity checks — 143 checks, no token needed
+# offline sanity checks — 166 checks, no token needed
 python3 bot.py --selftest
 ```
 
 No admins configured? The **first person to send `/post` in a private chat
 claims ownership** (handy for self-hosting; clear `data/apb.json` to reset).
+
+## ☁️ Deploy
+
+**This bot is pure Python — it is not a Node app.** There is no `package.json`
+and no JavaScript anywhere in the repo, so a Node.js runtime can only
+crash-loop it (`python: command not found`). Use a **Python 3** or **Docker**
+runtime with the start command `python bot.py`.
+
+```bash
+# any Docker host — pins python:3.12-slim, no guessing
+docker build -t apb .
+docker run -d --restart unless-stopped -e APB_TOKEN="123:ABC" \
+  -e APB_ADMINS="123456789" -p 8080:8080 -v apb-data:/data apb
+```
+
+The bot is a long-polling **worker**: it only dials out to `api.telegram.org`
+and needs no inbound traffic. For platforms that insist on probing a port
+(`==> Waiting for your service to be ready`), it also serves a tiny health
+endpoint when `PORT`/`APB_PORT` is set — `GET /health` (liveness) and
+`GET /ready` (readiness, 503 until logged in). Pure worker mode: `--no-health`.
+
+Per-platform settings (Render, Railway, Koyeb, Heroku, Fly, bare VPS), env
+vars, persistent state and a crash-loop troubleshooting table:
+**[`DEPLOY.md`](DEPLOY.md)**.
 
 ## 🧩 Posto features — all implanted
 
@@ -149,7 +173,8 @@ apb/
 ├── store.py           atomic JSON persistence (data/apb.json)
 ├── content.py         welcome/help/demo content
 ├── utils.py           time/interval & button-row parsing
-└── selftest.py        143 offline checks (python bot.py --selftest)
+├── health.py          tiny HTTP /health · /ready probe for PaaS deploys
+└── selftest.py        166 offline checks (python bot.py --selftest)
 ```
 
 **Smooth editing, exactly:** `SmoothEditor` coalesces any number of `update()`

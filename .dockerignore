@@ -1,0 +1,30 @@
+# Keep the build context small and reproducible.
+.git
+.gitignore
+.github
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Bot runtime state — never bake a live store into an image
+data/
+*.json.log
+logs/
+*.log
+
+# Node leftovers (there are none in this repo; ignored for safety)
+node_modules/
+
+# Docs & deploy helpers not needed at runtime
+DEPLOY.md
+RESEARCH.md
+README.md
+Dockerfile
+.dockerignore

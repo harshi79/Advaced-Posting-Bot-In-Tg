@@ -9,9 +9,10 @@ import datetime
 import io
 import json
 import os
+import shutil
 import sys
 import tempfile
-# (threads are exercised via the handlers themselves)
+import threading
 import time
 import urllib.error
 
@@ -22,6 +23,58 @@ from .store import Store
 from .utils import parse_button_rows, parse_when
 
 PASS, FAIL = [], []
+
+
+# ------------------------------------------------------- test infrastructure
+class _TolerantTempDir(tempfile.TemporaryDirectory):
+    """TemporaryDirectory that survives a daemon thread's late write.
+
+    Publishing fan-out workers, ``SmoothEditor`` timers and stream demos are
+    daemon threads (``apb/handlers.py``, ``apb/posto.py``, ``apb/smooth.py``).
+    One of them can call ``store.save()`` — which ``mkstemp()``s a ``.tmp``
+    file in the data dir — a hair *after* the ``with`` block exits. ``rmtree``
+    then dies with ``OSError: [Errno 39] Directory not empty`` on an otherwise
+    green run. Leftover files in /tmp are harmless; a red selftest is not.
+    """
+
+    def cleanup(self, *args, **kwargs):
+        try:
+            super().cleanup(*args, **kwargs)
+        except OSError:
+            shutil.rmtree(self.name, ignore_errors=True)
+
+
+def tmpdir():
+    """Version-proof temp dir whose cleanup never raises (Python 3.9 → 3.13)."""
+    try:                                    # 3.10+ has the flag built in
+        return tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+    except TypeError:                       # 3.9 → our tolerant subclass
+        return _TolerantTempDir()
+
+
+def quiesce(budget=20.0, per_thread=2.0):
+    """Join leftover daemon threads.
+
+    Without this, a worker that is still logging when the interpreter starts
+    finalizing aborts the whole process::
+
+        Fatal Python error: _enter_buffered_busy: could not acquire lock for
+        <_io.BufferedWriter name='<stderr>'> at interpreter shutdown,
+        possibly due to daemon threads
+
+    which surfaces as a selftest that passes every check and then dies with
+    exit code 134. Returns the names of threads that outlived the budget.
+    """
+    deadline = time.time() + budget
+    while True:
+        live = [t for t in threading.enumerate()
+                if t is not threading.current_thread() and t.is_alive()]
+        if not live:
+            return []
+        if time.time() >= deadline:
+            return [t.name for t in live]
+        for t in live:
+            t.join(max(0.0, min(per_thread, deadline - time.time())))
 
 
 def check(name, cond, detail=""):
@@ -256,7 +309,7 @@ def test_api_payload():
 
 
 def test_store():
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         path = os.path.join(tmp, "sub", "apb.json")
         s = Store(path)
         s.chat_ensure(10, "Ann", "private")
@@ -350,7 +403,7 @@ class FlowAPI:
 def test_composer_flow():
     from .handlers import Bot
     api = FlowAPI()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         store = Store(os.path.join(tmp, "apb.json"))
         bot = Bot(api, store, admins=[1])
         chat = {"id": 55, "type": "private"}
@@ -526,7 +579,7 @@ def test_nvidia_client():
 
 
 def test_store_posto():
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         s = Store(os.path.join(tmp, "apb.json"))
         check("settings default", s.setting("turbo") is False)
         s.set_setting("turbo", True)
@@ -561,7 +614,7 @@ def test_store_posto():
 def test_scheduler_recurring():
     from .handlers import Bot
     api = FlowAPI()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         store = Store(os.path.join(tmp, "apb.json"))
         bot = Bot(api, store, admins=[1], ai=FakeAI())
         now = time.time()
@@ -589,7 +642,7 @@ def test_scheduler_recurring():
 def test_ai_flow():
     from .handlers import Bot
     api = FlowAPI()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         store = Store(os.path.join(tmp, "apb.json"))
         bot = Bot(api, store, admins=[1], ai=FakeAI())
         chat = {"id": 55, "type": "private"}
@@ -642,7 +695,7 @@ def test_ai_flow():
 def test_bulk_flow():
     from .handlers import Bot
     api = FlowAPI()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         store = Store(os.path.join(tmp, "apb.json"))
         bot = Bot(api, store, admins=[1], ai=FakeAI())
         chat = {"id": 55, "type": "private"}
@@ -701,7 +754,7 @@ def test_bulk_flow():
 def test_slideshow_and_paid():
     from .handlers import Bot
     api = FlowAPI()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         store = Store(os.path.join(tmp, "apb.json"))
         bot = Bot(api, store, admins=[1], ai=FakeAI())
 
@@ -752,7 +805,7 @@ def test_slideshow_and_paid():
 def test_channels_and_templates_flow():
     from .handlers import Bot
     api = FlowAPI()
-    with tempfile.TemporaryDirectory() as tmp:
+    with tmpdir() as tmp:
         store = Store(os.path.join(tmp, "apb.json"))
         bot = Bot(api, store, admins=[1], ai=FakeAI())
         chat = {"id": 55, "type": "private"}
@@ -843,6 +896,102 @@ def test_watermark_module():
         check("watermark graceful without PIL", True)
 
 
+def test_health_server():
+    """The HTTP probe platforms use to decide a deploy is healthy."""
+    import urllib.request
+    from . import health
+
+    def get(url, method="GET"):
+        req = urllib.request.Request(url, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as e:          # 4xx/5xx are real answers
+            return e.code, e.read()
+
+    # --- port resolution -------------------------------------------------
+    old = {k: os.environ.get(k) for k in ("PORT", "APB_PORT")}
+    try:
+        os.environ.pop("PORT", None)
+        os.environ.pop("APB_PORT", None)
+        check("no port env → no health server", health.resolve_port() is None)
+        os.environ["PORT"] = "9111"
+        check("PORT is honoured", health.resolve_port() == 9111)
+        os.environ["APB_PORT"] = "9222"
+        check("APB_PORT beats PORT", health.resolve_port() == 9222)
+        check("--port beats both", health.resolve_port(9333) == 9333)
+        os.environ["APB_PORT"] = "not-a-port"
+        check("garbage port ignored", health.resolve_port() == 9111)
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+    # --- live socket -----------------------------------------------------
+    hs = health.HealthServer(port=0, host="127.0.0.1",
+                             stats=lambda: {"bot": "@selftest"})
+    started = hs.start()          # blocks until the socket is listening
+    check("health server binds", started is True and hs.bound and hs.bound_port > 0,
+          (started, hs.bound_port))
+    base = "http://127.0.0.1:{}".format(hs.bound_port)
+
+    code, body = get(base + "/health")
+    payload = json.loads(body or b"{}")
+    check("/health is 200 while starting", code == 200, code)
+    check("/health reports liveness json",
+          payload.get("status") == "starting" and payload.get("ready") is False
+          and payload.get("runtime") == "python"
+          and payload.get("service") == "advanced-posting-bot", payload)
+    check("stats callable merged", payload.get("bot") == "@selftest", payload)
+
+    code, _ = get(base + "/ready")
+    check("/ready is 503 before login", code == 503, code)
+
+    hs.mark_ready("polling @x")
+    code, body = get(base + "/ready")
+    check("/ready flips to 200", code == 200, code)
+    check("/ready carries detail",
+          json.loads(body).get("detail") == "polling @x")
+    check("status becomes ok once ready",
+          json.loads(get(base + "/health")[1]).get("status") == "ok")
+    hs.mark_not_ready("degraded")
+    check("mark_not_ready reverts readiness", get(base + "/ready")[0] == 503)
+    hs.mark_ready("polling @x")
+
+    code, body = get(base + "/")
+    check("/ is a plain 200", code == 200 and b"Advanced Posting Bot" in body, code)
+    code, _ = get(base + "/healthz")
+    check("/healthz alias works", code == 200, code)
+    code, _ = get(base + "/nope")
+    check("unknown path is 404", code == 404, code)
+
+    code, body = get(base + "/health", method="HEAD")
+    check("HEAD /health is 200 with empty body", code == 200 and body == b"",
+          (code, body))
+
+    hs.stats = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    code, body = get(base + "/health")
+    check("broken stats never break /health",
+          code == 200 and "boom" in json.loads(body).get("stats_error", ""), code)
+    check("probe hits counted", hs.hits >= 7, hs.hits)
+
+    # A taken port must not take the bot down with it — it logs and reports
+    # False, so the banner can warn that a port-probing platform will fail.
+    dup = health.HealthServer(port=hs.bound_port, host="127.0.0.1")
+    check("second bind on a taken port fails cleanly",
+          dup.start(wait=3) is False and dup.bound is False, dup.bound)
+    check("the original still answers", get(base + "/health")[0] == 200)
+
+    hs.stop()
+    try:
+        get(base + "/health")
+        check("port released after stop", False, "still answering")
+    except Exception:
+        check("port released after stop", True)
+
+
 def test_parse_interval():
     from .utils import parse_interval
     check("interval 6h", parse_interval("6h") == 21600)
@@ -857,17 +1006,23 @@ def test_parse_interval():
 def run():
     print("Advanced Posting Bot — selftest\n")
     t0 = time.time()
+    stragglers = []
     for fn in (test_richtext, test_blocks, test_rich_message, test_analysis,
                test_parse_when, test_parse_buttons, test_smooth_editor,
                test_api_payload, test_store, test_content, test_composer_flow,
                test_mdblocks, test_nvidia_client, test_store_posto,
                test_scheduler_recurring, test_ai_flow, test_bulk_flow,
                test_slideshow_and_paid, test_channels_and_templates_flow,
-               test_watermark_module, test_parse_interval):
+               test_watermark_module, test_health_server, test_parse_interval):
         print("· {}".format(fn.__name__))
         fn()
+        # Publishing/streaming workers are daemon threads; let them land before
+        # the next test (and long before interpreter shutdown — see quiesce()).
+        stragglers = quiesce() or stragglers
     dt = time.time() - t0
     print("\n{}/{} checks passed in {:.2f}s".format(len(PASS), len(PASS) + len(FAIL), dt))
+    if stragglers:
+        print("note: threads still running after the run: {}".format(", ".join(stragglers)))
     if FAIL:
         print("FAILED: " + ", ".join(FAIL))
         return 1
