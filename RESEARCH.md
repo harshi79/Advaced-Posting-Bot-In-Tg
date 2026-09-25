@@ -23,13 +23,13 @@ implanted feature-by-feature:
 | Posto feature | Research finding | Implantation |
 | :- | :- | :- |
 | Multi-channel publishing | "write once, post everywhere; each channel gets its own timing, links, buttons" | `/channels` (add by forward/@username, per-channel signature + delay), 🌐 publish with live progress |
-| Scheduled posts | natural scheduling | `parse_when()`: `+90m`, `21:30`, `tomorrow 09:00`, absolute dates |
-| **Recurring** | repeat posts | `repeat` field on jobs (hourly/daily/weekly/`every:Ns`), drift-free `reschedule_recurring()`, ⏹ end buttons |
+| Scheduled posts | natural scheduling | `parseWhen()`: `+90m`, `21:30`, `tomorrow 09:00`, absolute dates |
+| **Recurring** | repeat posts | `repeat` field on jobs (hourly/daily/weekly/`every:Ns`), drift-free `rescheduleRecurring()`, ⏹ end buttons |
 | **Bulk posting** | "forward a hundred posts and they'll be scheduled instantly" | `/bulk` collector (albums merged via `media_group_id`), post-all-now or auto-schedule at `start + i*interval` |
 | Templates | repeating formats with buttons/signature | `/templates` + composer 📋 save (markdown, buttons, media, signature) |
 | Buttons | inline buttons | `/buttons` + `InlineKeyboardButton.style` colors (9.4, free) |
 | AI (GPT) | "rewrite or translate text, generate new content" | NVIDIA NIM (see below) — write/rewrite/translate/shorten/expand, streaming |
-| Watermarks | photo/video watermarks | optional Pillow watermark re-uploaded via `attach://` multipart; signature fallback |
+| Watermarks | photo/video watermarks | optional `sharp` watermark re-uploaded via `attach://` multipart; signature fallback |
 | Slideshow generator | albums → slideshows | 🎞 toggle + `/slideshow`; blocks-mode `tg-slideshow` with file_id media |
 | Turbo Mode | "instant bulk operations without extra clicks" | `/turbo` — `/done` publishes instantly |
 | Hidden text | | `||spoilers||` (free Rich Markdown) |
@@ -47,7 +47,7 @@ paid.*
 - **Free permanent API key** (`nvapi-...`), **no credit card**, no expiring
   credits; the free tier is rate-limited at **~40 requests/minute**.
 - OpenAI-compatible: `https://integrate.api.nvidia.com/v1/chat/completions`
-  (works with plain `urllib` — no SDK needed).
+  (works with Node's built-in `fetch` — no SDK needed).
 - Hosts NVIDIA's own latest open models plus Meta/DeepSeek/Qwen etc.
 
 **Chosen model (the ONE): `nvidia/nemotron-3-super-120b-a12b`**

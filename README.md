@@ -1,16 +1,23 @@
-# ✨ Advanced Posting Bot in Telegram
+# ✨ Advanced Posting Bot in Telegram — **Node.js edition**
 
 A **rich-media posting bot** for channels, groups and private chats — built on
-**Telegram Bot API 10.3** (Aug 2026) with **zero dependencies** (pure Python 3
-stdlib), now with **all of @PostoRobot's automation features** and **free-forever
-NVIDIA AI**.
+**Telegram Bot API 10.3** with **zero npm dependencies**, now with **all of
+@PostoRobot's automation features** and **free-forever NVIDIA AI**.
 
-It makes a bot look *Premium without Premium*: real headings, tables,
-collapsible sections, checklists, LaTeX math, marked text, spoilers, colored
-buttons — and **buttery-smooth message editing / live streaming**. All of it is
-free; the only Premium-gated Bot API feature (custom emoji) is deliberately
-avoided. See [`RESEARCH.md`](RESEARCH.md) for the full version-by-version
-read-through (9.1 → 10.3) and the Posto feature research.
+> **Now 100% Node.js.** The old Python build (`apb/`, `bot.py`,
+> `requirements.txt`, `nixpacks.toml`) has been removed, because web services
+> that boot a Node image and then try to run `python bot.py` crash-loop:
+>
+> ```
+> ==> Using Node.js 20
+> ==> Build successful in 18s
+> ==> Waiting for your service to be ready
+> Deploy aborted - the new version was crash-looping.
+> ```
+>
+> This repo is now a real Node app: `package.json` + `npm start`, no Python
+> anywhere, and the process serves `/health` on `$PORT` so the platform's
+> readiness probe is satisfied **before** the first Telegram round-trip.
 
 ```
  _   _ _______ ____  __  __ _____ ____      _    _
@@ -20,6 +27,13 @@ read-through (9.1 → 10.3) and the Posto feature research.
 |_| |_|_____|____/|_|  |_|_____|_| \_\/_/   \_\_____|
      Advanced Posting Bot · rich · free · smooth · Posto-grade
 ```
+
+It makes a bot look *Premium without Premium*: real headings, tables,
+collapsible sections, checklists, LaTeX math, marked text, spoilers, colored
+buttons — and **buttery-smooth message editing / live streaming**. All of it is
+free; the only Premium-gated Bot API feature (custom emoji) is deliberately
+avoided. See [`RESEARCH.md`](RESEARCH.md) for the version-by-version read-through
+(9.1 → 10.3) and the Posto feature research.
 
 ## 🚀 Quick start
 
@@ -31,39 +45,57 @@ export APB_ADMINS="123456789"        # your user id (optional — see below)
 # 2. (optional, free forever) NVIDIA AI — build.nvidia.com → API keys
 export APB_NVIDIA_KEY="nvapi-..."
 
-# 3. run (Python 3.9+, nothing to install!)
-python3 bot.py
+# 3. run (Node 20+, nothing to install!)
+npm start
 
-# offline sanity checks — 166 checks, no token needed
-python3 bot.py --selftest
+# offline sanity checks — 265 checks, no token, no network
+npm test
 ```
 
 No admins configured? The **first person to send `/post` in a private chat
 claims ownership** (handy for self-hosting; clear `data/apb.json` to reset).
 
-## ☁️ Deploy
+## ☁️ Deploy (Veroa / Render / Railway / Docker)
 
-**This bot is pure Python — it is not a Node app.** There is no `package.json`
-and no JavaScript anywhere in the repo, so a Node.js runtime can only
-crash-loop it (`python: command not found`). Use a **Python 3** or **Docker**
-runtime with the start command `python bot.py`.
+| Setting | Value |
+| :- | :- |
+| Runtime | **Node.js 20** (or Docker) |
+| Install / build | `npm install` *(installs nothing — zero deps)* |
+| **Start command** | **`npm start`** or `node src/index.js` |
+| Port | the `PORT` env var the platform gives you (default `8080`) |
+| Health check path | `/health` (liveness) — `/ready` flips to 200 after login |
+| Types | **Web Service** and **Worker** both work |
+
+Environment variables on the service:
+
+```
+APB_TOKEN        123456789:AA…        # required
+APB_ADMINS       123456789            # optional, comma-separated user ids
+APB_NVIDIA_KEY   nvapi-…              # optional, free AI
+APB_DATA_DIR     /data                # optional, persistent state
+```
 
 ```bash
-# any Docker host — pins python:3.12-slim, no guessing
+# any Docker host — pins node:20, no guessing
 docker build -t apb .
 docker run -d --restart unless-stopped -e APB_TOKEN="123:ABC" \
   -e APB_ADMINS="123456789" -p 8080:8080 -v apb-data:/data apb
 ```
 
-The bot is a long-polling **worker**: it only dials out to `api.telegram.org`
-and needs no inbound traffic. For platforms that insist on probing a port
-(`==> Waiting for your service to be ready`), it also serves a tiny health
-endpoint when `PORT`/`APB_PORT` is set — `GET /health` (liveness) and
-`GET /ready` (readiness, 503 until logged in). Pure worker mode: `--no-health`.
+The bot is a long-polling **worker** (it only dials out to `api.telegram.org`)
+and *also* serves a status page:
 
-Per-platform settings (Render, Railway, Koyeb, Heroku, Fly, bare VPS), env
-vars, persistent state and a crash-loop troubleshooting table:
-**[`DEPLOY.md`](DEPLOY.md)**.
+| Route | Meaning |
+| :- | :- |
+| `/` | pretty status page (HTML in a browser, JSON for probes) |
+| `/health`, `/healthz`, `/live` | **200** as soon as the socket is up |
+| `/ready`, `/readyz` | **200** only once the bot has logged in (503 before) |
+| `/status` | the raw JSON stats |
+
+Pure worker mode (no socket at all): `npm run worker` or `--no-health`.
+
+Per-platform settings, env vars, persistent state and a crash-loop
+troubleshooting table: **[`DEPLOY.md`](DEPLOY.md)**.
 
 ## 🧩 Posto features — all implanted
 
@@ -75,10 +107,10 @@ Everything [@PostoRobot](https://t.me/PostoRobot) does, free:
 | **Scheduled posts** | natural language: `+90m` · `21:30` · `tomorrow 09:00` · `2026-12-25 10:00` |
 | **Recurring posts** | repeat **hourly / daily / weekly / custom** (`every 6h`); survives restarts; `/schedule` → ⏹ end |
 | **Bulk posting** | `/bulk` — send 100 posts (albums kept together), then **post all now** or **auto-schedule** spread over time |
-| **Templates** | `/templates` + 📋 save from composer — buttons, media & signature included |
+| **Templates** | `/templates` + 📋 save from the publish panel — buttons, media & signature included |
 | **Buttons** | `/buttons` — colored inline buttons (blue/green/red, free) |
 | **AI** | 🤖 NVIDIA NIM — write, rewrite, translate, shorten, expand; output **streams in live** and loads into your post with one tap |
-| **Watermarks** | ©️ watermark photos on publish (optional `pip install Pillow`) + per-channel/per-post **signatures** |
+| **Watermarks** | ©️ watermark photos on publish (optional `npm install sharp`) + per-channel/per-post **signatures** |
 | **Slideshow generator** | send an album while composing → toggle 🎞 Slideshow; or `/slideshow` |
 | **Turbo Mode** | `/turbo` — `/done` publishes instantly, zero confirmation clicks |
 | **Hidden text** | `||spoiler||` in Rich Markdown (free) |
@@ -87,10 +119,9 @@ Everything [@PostoRobot](https://t.me/PostoRobot) does, free:
 
 ## 🤖 AI — NVIDIA only, free forever
 
-One model, no paid anything: **`nvidia/nemotron-3-super-120b-a12b`** — NVIDIA's
-own latest Nemotron-3 generation (hybrid Mamba-Transformer MoE, ~1M context,
-fast) on the **free NIM tier** at `integrate.api.nvidia.com`:
-no credit card, no expiring credits, ~40 requests/minute.
+One model, no paid anything: **`nvidia/nemotron-3-super-120b-a12b`** on the
+**free NIM tier** at `integrate.api.nvidia.com` — no credit card, no expiring
+credits, ~40 requests/minute.
 
 ```bash
 export APB_NVIDIA_KEY="nvapi-..."   # build.nvidia.com → API keys
@@ -147,7 +178,7 @@ private chats, smooth edits elsewhere) and becomes your post with one tap.
 4. `/preview` — keep typing, the preview edits itself smoothly.
 5. `/done` → panel: **Publish here · 🌐 Channels · 📣 Channel… · Broadcast all ·
    Schedule (with repeat) · Effect · Paid (⭐ Stars) · Signature · Watermark ·
-   Save draft/template**.
+   Save draft/Template**.
 6. Buttons (one row per line, `;;` splits a row):
 
    ```
@@ -159,31 +190,36 @@ private chats, smooth edits elsewhere) and becomes your post with one tap.
 ## 🏗 Architecture
 
 ```
-bot.py                 entry point (CLI, polling loop)
-apb/
-├── api.py             Bot API 10.3 client (urllib, retries, 429 backoff, multipart)
-├── rich.py            RichText/RichBlock/InputRichMessage builders + limit checks
-├── smooth.py          SmoothEditor (debounced rich edits) · SmoothStream (drafts)
-├── handlers.py        commands, callbacks, composer wizard, publishing
-├── posto.py           Posto features: channels/bulk/templates/turbo/AI/slideshow
-├── nvidia.py          NVIDIA NIM client (free tier, SSE streaming)
-├── mdblocks.py        Markdown → InputRichBlock converter (slideshow posts)
-├── watermark.py       optional Pillow photo watermarking
-├── scheduler.py       background thread: scheduled + recurring posts
-├── store.py           atomic JSON persistence (data/apb.json)
-├── content.py         welcome/help/demo content
-├── utils.py           time/interval & button-row parsing
-├── health.py          tiny HTTP /health · /ready probe for PaaS deploys
-└── selftest.py        166 offline checks (python bot.py --selftest)
+package.json           npm start → node src/index.js (no dependencies)
+src/
+├── index.js           entry point: CLI, HTTP server first, login retry, polling, SIGTERM
+├── health.js          HTTP status page + /health · /ready (what keeps PaaS deploys alive)
+├── telegram.js        Bot API 10.3 client (fetch, retries, 429 backoff, multipart, polling)
+├── rich.js            RichText/RichBlock/InputRichMessage builders + limit checks
+├── smooth.js          Debouncer · SmoothEditor (debounced rich edits) · SmoothStream (drafts)
+├── handlers.js        commands, callbacks, composer wizard, publishing
+├── posto.js           Posto features: channels/bulk/templates/turbo/AI/slideshow/paid
+├── nvidia.js          NVIDIA NIM client (free tier, SSE streaming)
+├── mdblocks.js        Markdown → InputRichBlock converter (slideshow posts)
+├── watermark.js       optional sharp photo watermarking (degrades to a signature)
+├── scheduler.js       interval loop: scheduled + recurring posts
+├── store.js           atomic JSON persistence (data/apb.json)
+├── content.js         welcome/help/demo content
+├── utils.js           time/interval/button-row parsing
+└── selftest.js        265 offline checks (npm test)
 ```
 
 **Smooth editing, exactly:** `SmoothEditor` coalesces any number of `update()`
-calls into ≤1 `editMessageText` per interval, skips no-op payloads, honors
+calls into ≤1 `editMessageText` per interval, skips no-op payloads, honours
 `retry_after`, and swallows “message is not modified”. `SmoothStream` uses
 `sendRichMessageDraft` with a stable `draft_id` (Telegram animates the change),
 shows the `thinking` block while producing content, and finalizes with
 `sendRichMessage`; in groups it transparently falls back to a `SmoothEditor`
 on a real message.
+
+**Never crash-loops:** a missing token, a rejected token, no outbound network or
+a crashed handler are all logged with an exact fix and retried forever while
+`/health` stays green — the deployment succeeds, the log tells you what to fix.
 
 ## ⚠️ Notes & limits
 
@@ -196,8 +232,13 @@ on a real message.
 - Broadcasts/bulk are paced (~1 msg/s + per-channel delay) to respect limits.
 - Paid posts are **experimental** — Telegram decides where paid media may
   appear; errors are surfaced in the panel.
+- State lives in `data/apb.json` unless `APB_DATA_DIR` is set; on platforms with
+  ephemeral disks that file resets on redeploy (mount a disk to keep it).
 - AI is rate-limited by NVIDIA's free tier (~40 req/min) — the bot surfaces
   friendly errors and never falls back to a paid provider.
+- If a Bot API server does not implement Rich Messages (older/self-hosted API
+  servers answer `method not found`), publishing automatically falls back to a
+  classic plain-text message instead of failing the post.
 
 ## 📄 License
 

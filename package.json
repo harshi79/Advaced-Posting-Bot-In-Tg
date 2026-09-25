@@ -1,0 +1,29 @@
+{
+  "name": "advanced-posting-bot",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Advanced Posting Bot for Telegram — rich-media posting, scheduling, bulk posting, channels, templates and free NVIDIA AI. 100% Node.js, zero runtime dependencies, Bot API 10.3.",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "bot": "node src/index.js",
+    "selftest": "node src/index.js --selftest",
+    "test": "node src/index.js --selftest",
+    "worker": "node src/index.js --no-health"
+  },
+  "dependencies": {},
+  "optionalDependencies": {},
+  "keywords": [
+    "telegram",
+    "bot",
+    "rich-messages",
+    "posting",
+    "scheduler",
+    "nvidia"
+  ],
+  "license": "MIT"
+}

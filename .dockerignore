@@ -3,15 +3,11 @@
 .gitignore
 .github
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-.mypy_cache/
-.pytest_cache/
-.ruff_cache/
+# Node
+node_modules/
+npm-debug.log*
+.npm/
+.pnpm-store/
 
 # Bot runtime state — never bake a live store into an image
 data/
@@ -19,8 +15,11 @@ data/
 logs/
 *.log
 
-# Node leftovers (there are none in this repo; ignored for safety)
-node_modules/
+# Python leftovers (the bot is Node-only now; ignored for safety)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
 
 # Docs & deploy helpers not needed at runtime
 DEPLOY.md

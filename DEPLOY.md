@@ -1,191 +1,184 @@
-# ☁️ Deploying Advanced Posting Bot
+# 🚀 Deploying the Advanced Posting Bot (Node.js)
 
-> **TL;DR** — this repo is **pure Python**. It contains no `package.json`, no
-> JavaScript and no TypeScript (in *any* commit of its history), so a Node.js
-> runtime can only crash-loop it. Deploy it on a **Python** or **Docker**
-> runtime with the start command `python bot.py`.
+The bot is a **long-polling worker** — it only makes *outbound* HTTPS calls to
+`api.telegram.org` — that *also* serves a tiny HTTP status page on `$PORT`. That
+combination runs unchanged on any web-service OR worker platform: Veroa, Render,
+Railway, Heroku, Koyeb, Fly.io, Google Cloud Run, a bare VPS, Docker…
 
 ```
-==> Using Node.js 20          ← wrong runtime for this repo
-==> Building                  ← "succeeds": there is nothing for Node to build
+runtime      : Node.js 20 (or Docker)
+install      : npm install          ← installs nothing, zero dependencies
+start        : npm start            ← node src/index.js
+health check : /health              ← 200 the moment the port is bound
+required env : APB_TOKEN
+```
+
+---
+
+## ⚡ Fixing “Deploy aborted - the new version was crash-looping”
+
+If you saw this on Veroa (or anywhere else):
+
+```
+==> Cloning from https://github.com/… (branch main)
+==> Using Node.js 20
+==> Building
+==> Build successful in 18s
+==> Preparing image
+==> Deploying
 ==> Waiting for your service to be ready
 Deploy aborted - the new version was crash-looping.
+==> Deployment failed
 ```
 
-Those two lines describe two separate problems, and both are fixed below.
+…it happened because the repository used to be a **Python** app
+(`bot.py`, `apb/*.py`, `.python-version`) while the platform had already
+committed to a **Node.js 20** runtime. The image boots Node, Node looks for a
+`package.json`/`npm start`, finds a `python bot.py` world, and the service exits
+instantly — a crash loop. Two extra traps made it worse:
 
----
+1. **No port was opened**, so “Waiting for your service to be ready” could never
+   succeed even when the process ran.
+2. Any missing token / rejected token / DNS hiccup **exited** the process, which
+   the platform books as another crash.
 
-## 1. Why it crash-looped
+All three are fixed in this repo:
 
-| # | Cause | Detail |
-| :- | :- | :- |
-| 1 | **Wrong runtime** | The service was configured as Node.js. The start command is `python bot.py` (see [`Procfile`](Procfile)) — there is no Python interpreter in a Node image, so the process exits instantly and the platform restarts it forever. |
-| 2 | **A poller opens no port** | Even on a Python runtime, this bot is a **long-polling worker**: it only makes *outbound* HTTPS calls to `api.telegram.org`. "Web service" platforms wait for a listening TCP port (`==> Waiting for your service to be ready`) and abort when none appears. |
-| 3 | **Missing/blank `APB_TOKEN`** | If the token env var is not set *on the service* (only on your laptop), the bot exits with a message. Some platforms report that as a crash loop too. |
-
-**Fixes now in the repo**
-
-* `apb/health.py` — a stdlib HTTP server on `$PORT` (see §4) so port-probing
-  platforms have something to hit. Enabled automatically when `PORT` /
-  `APB_PORT` is set, off otherwise.
-* [`Dockerfile`](Dockerfile) — pins `python:3.12-slim`; works on every platform
-  that can build an image and removes all runtime guessing.
-* [`.python-version`](.python-version) (`3.12.10`) + [`nixpacks.toml`](nixpacks.toml)
-  + [`render.yaml`](render.yaml) — language markers for auto-detecting builders.
-* [`Procfile`](Procfile) — now declares **both** `web:` and `worker:`.
-* `bot.py` — readable failure messages (bad token → exit 3), `APB_DATA_DIR`
-  support, and a fallback when the data directory is read-only.
-
----
-
-## 2. Environment variables
-
-| Variable | Required | Purpose |
-| :- | :- | :- |
-| `APB_TOKEN` | **yes** | Bot token from [@BotFather](https://t.me/BotFather) — `123456789:AAH…`. `BOT_TOKEN` / `TELEGRAM_TOKEN` are also accepted. |
-| `APB_ADMINS` | no | Comma-separated Telegram user ids. If unset, the first person to send `/post` in a private chat claims ownership. |
-| `APB_NVIDIA_KEY` | no | `nvapi-…` key from [build.nvidia.com](https://build.nvidia.com) — enables the free AI features. |
-| `PORT` / `APB_PORT` | platform | Health-check port. Injected automatically by most PaaS. **Unset → no socket is opened at all.** |
-| `APB_DATA_DIR` | no | Where `apb.json` (chats, drafts, templates, schedules) lives. Default `./data`. Point it at a mounted disk/volume. |
-
-Never commit tokens. Set them in the platform dashboard as *secret* env vars.
-
----
-
-## 3. Per-platform recipes
-
-### Render — the log above looks like Render
-1. Your current service: **Settings → Runtime → change `Node` to `Python 3`**
-   (or `Docker`, which uses the Dockerfile and is the most predictable).
-2. **Build command:** `pip install -r requirements.txt`
-3. **Start command:** `python bot.py`
-4. Best shape: delete the Web Service and create a **Background Worker**
-   (workers are not port-probed). Then start with `python bot.py --no-health`.
-   Keeping it a Web Service is fine too — set **Health Check Path** to `/health`.
-5. Env: `APB_TOKEN`, `APB_ADMINS`, optional `APB_NVIDIA_KEY`.
-6. Persistence: add a **Disk** (e.g. mounted at `/var/data`) and set
-   `APB_DATA_DIR=/var/data`. Render's filesystem is wiped on every deploy.
-7. Free-tier web services sleep after 15 min idle — a sleeping poller receives
-   no updates. Use a Background Worker (never sleeps) or a paid instance.
-8. Or let [`render.yaml`](render.yaml) do all of it: **New → Blueprint**.
-
-### Railway
-* **Settings → Build → Builder:** `DOCKERFILE` (recommended) or `NIXPACKS`
-  (`nixpacks.toml` pins Python 3.12 and the start command).
-* **Settings → Deploy → Start command:** `python bot.py`
-* Variables: `APB_TOKEN`, `APB_ADMINS`, `APB_NVIDIA_KEY`. Railway injects
-  `PORT` only if you generate a domain; set `APB_PORT=8080` yourself otherwise,
-  or run `python bot.py --no-health` and use a worker-style service.
-* Volume: mount one at `/data`, set `APB_DATA_DIR=/data`.
-
-### Koyeb
-* Service type **Worker** (no port/health check needed) or **Web** with health
-  check path `/health`.
-* Koyeb wants a *fully qualified* `.python-version` — `3.12.10` ✓ (already set),
-  or just use the Dockerfile.
-* Start: `python bot.py`. Volumes are supported on paid plans → `APB_DATA_DIR`.
-
-### Heroku
-```bash
-heroku create advanced-posting-bot
-heroku stack:set container -a advanced-posting-bot   # or add runtime.txt for the Python buildpack
-heroku config:set APB_TOKEN="123:ABC" APB_ADMINS="123456789"
-git push heroku arena/01a0d7b1-advaced-posting-bot-in-tg:main
-```
-Heroku's Python buildpack needs a **`runtime.txt`** with a currently supported
-version (e.g. `python-3.12.10`) — add one only if you use that buildpack, since
-Heroku rejects versions it no longer ships. The container stack (`Dockerfile`)
-has no such restriction. Use a **worker** dyno: `heroku ps:scale web=0 worker=1`.
-
-### Fly.io
-```bash
-fly launch --no-deploy --copy-config   # accepts the Dockerfile
-fly secrets set APB_TOKEN="123:ABC" APB_ADMINS="123456789"
-fly volumes create apb_data --size 1    # then mount it and set APB_DATA_DIR
-fly deploy
-```
-Remove the `http_service` block from the generated `fly.toml` (or keep it and
-point checks at `/health`) — the bot needs no inbound traffic.
-
-### Any Docker host / VPS
-```bash
-docker build -t apb .                                  # add --build-arg WITH_PILLOW=1 for photo watermarks
-docker run -d --name apb --restart unless-stopped \
-  -e APB_TOKEN="123:ABC" -e APB_ADMINS="123456789" \
-  -e APB_NVIDIA_KEY="nvapi-..." -e PORT=8080 -p 8080:8080 \
-  -v apb-data:/data apb
-docker logs -f apb
-```
-
-### Plain server, no containers
-```bash
-git clone https://github.com/harshi79/Advaced-Posting-Bot-In-Tg && cd Advaced-Posting-Bot-In-Tg
-export APB_TOKEN="123:ABC" APB_ADMINS="123456789"
-python3 bot.py --no-health          # Python 3.9+, nothing to install
-# keep it alive with systemd / pm2 / supervisor / tmux
-```
-
----
-
-## 4. Health endpoints (`apb/health.py`)
-
-Bound to `0.0.0.0:$PORT` **only** when `PORT`/`APB_PORT`/`--port` is set.
-Liveness and readiness are separate, so a slow `getMe` round-trip can never be
-mistaken for a crash loop.
-
-| Endpoint | Code | Meaning |
-| :- | :- | :- |
-| `/` | 200 | human-readable "ok" |
-| `/health`, `/healthz`, `/live` | 200 | **liveness** — the process is up (JSON: uptime, pid, bot, chats, scheduled) |
-| `/ready`, `/readyz` | 200 / 503 | **readiness** — 200 only after the bot logged in and started polling |
-| anything else | 404 | JSON hint |
-
-`HEAD` is supported on every path. Use `/health` for platform health checks
-unless your platform distinguishes liveness/readiness (then `/live` + `/ready`).
-
-Turn it off entirely with `--no-health` (pure worker mode, zero sockets).
-
----
-
-## 5. Persistent state
-
-`apb.json` holds chats, composer drafts, templates, channel signatures,
-scheduled/recurring posts and bulk queues. Without a disk it is rebuilt from
-scratch on every deploy — schedules included.
-
-| Platform | What to do |
+| Before | Now |
 | :- | :- |
-| Render | Add a Disk → `APB_DATA_DIR=/var/data` |
-| Railway | Add a Volume → `APB_DATA_DIR=/data` |
-| Fly | `fly volumes create` → mount → `APB_DATA_DIR=/data` |
-| Docker | `-v apb-data:/data` (the image already defaults to `/data`) |
-| VPS | leave the default `./data`, or set `APB_DATA_DIR` |
+| Python app on a Node runtime | real Node app: `package.json`, `npm start`, `src/*.js` |
+| No listening port | HTTP status server on `$PORT` **before** the first Telegram call |
+| Exits on missing/rejected token or network error | logs the exact fix and **retries forever**, `/health` stays 200 |
+| Fatal error → process dies | fatal error → loud log, process stays alive (never “crash-looping”) |
 
-If the chosen directory turns out to be read-only, the bot prints a warning and
-falls back to a temp dir instead of dying — check your logs for
-`WARNING: data dir … is not writable`.
+**What to set on the service (Veroa dashboard → your service → Settings):**
+
+```
+Runtime / Build : Node.js 20            (Docker also fine — Dockerfile included)
+Install command : npm install
+Start command   : npm start
+Port            : from the PORT env var the platform injects (default 8080)
+Health check    : /health
+```
+
+Then add the environment variables below and redeploy.
+
+Open the service URL in a browser afterwards: you should get the status page,
+a green **ready** pill and `"bot": "@your_bot"` in the table.
 
 ---
 
-## 6. Troubleshooting
+## 🔑 Environment variables
 
-| Symptom | Likely cause | Fix |
+| Variable | Required | Meaning |
 | :- | :- | :- |
-| `Using Node.js 20` in the build log | service runtime is Node | switch to Python 3 / Docker (§3) |
-| Build OK, instant crash loop | `python` missing (Node image) or bad start command | start command `python bot.py` |
-| `Waiting for your service to be ready` times out | web service, nothing listening | set `PORT`, or use a worker + `--no-health` |
-| `No bot token. Set APB_TOKEN…` (exit 2) | env var not set on the service | add `APB_TOKEN` in the dashboard and redeploy |
-| `Could not log in to Telegram: …` (exit 3) | token revoked/typo/extra quotes | regenerate at @BotFather, paste raw |
-| `TelegramError: getUpdates (409)` | the same token is polling twice | stop the other copy (laptop, old service) |
-| `health server could not bind` | port taken / not allowed | let the platform inject `PORT`, or `--port N` |
-| state disappears after each deploy | ephemeral filesystem | mount a disk and set `APB_DATA_DIR` (§5) |
-| watermark says "text signature" | Pillow absent | `pip install Pillow` or build with `--build-arg WITH_PILLOW=1` |
+| `APB_TOKEN` | ✅ | bot token from @BotFather (`123456789:AA…`). Also accepts `BOT_TOKEN`, `TELEGRAM_TOKEN`, `TG_BOT_TOKEN`. |
+| `APB_ADMINS` | – | comma-separated Telegram **user ids** allowed to post (`123456789,987654321`). If unset, the first `/post` in a private chat claims ownership. |
+| `APB_NVIDIA_KEY` | – | free NVIDIA NIM key (`nvapi-…`) for the AI features. `NVIDIA_API_KEY` also works. |
+| `APB_AI_MODEL` | – | override the AI model (default `nvidia/nemotron-3-super-120b-a12b`). |
+| `APB_DATA_DIR` | – | where `apb.json` lives (default `./data` in the repo). Point it at a mounted disk for persistence. |
+| `PORT` / `APB_PORT` | – | HTTP port. Injected by most platforms; default `8080`. |
+| `APB_LOG_LEVEL` | – | `debug` \| `info` \| `warn` \| `error` \| `silent`. |
 
-Verify a deploy locally before pushing:
+Never commit the token to the repo — set it in the dashboard.
+
+---
+
+## 🩺 Health & readiness
+
+| Route | Response |
+| :- | :- |
+| `GET /` | HTML status page in a browser, JSON for probes |
+| `GET /health`, `/healthz`, `/live`, `/liveness` | **200** JSON — bound socket, bot alive |
+| `GET /ready`, `/readyz`, `/readiness` | **200** once logged in, **503** while starting |
+| `GET /status` | raw JSON stats (chats, channels, drafts, scheduled, sent, failed, AI) |
+
+Liveness is deliberately green *before* the Telegram login finishes, so a slow
+`getMe` (or an unreachable API) can never be mistaken for a crash loop. Watch
+`/ready` to know when the bot is actually polling.
+
+---
+
+## 🧱 Platform recipes
+
+### Veroa (web service)
+
+1. Connect the repo, branch `main`.
+2. Build: `npm install` · Start: `npm start` · Port: from `PORT`.
+3. Health check path: `/health`.
+4. Add `APB_TOKEN` (+ `APB_ADMINS`, `APB_NVIDIA_KEY`) as environment variables.
+5. Deploy, then open the URL — the status page should say **ready**.
+
+### Render
+
+`render.yaml` in this repo is a Node blueprint: runtime `node`, build
+`npm install --omit=dev`, start `npm start`, health check `/health`, plus an
+optional 1 GB disk mounted at `/var/data` with `APB_DATA_DIR=/var/data`.
+Or do it by hand: **New → Web Service → Runtime Node**, same commands.
+
+### Railway / Koyeb / Heroku
+
+Let the platform detect Node (or use the included `Dockerfile`). Start command
+`npm start`; the `Procfile` in the repo also defines `web: npm start` and
+`worker: node src/index.js --no-health`.
+
+### Fly.io / Cloud Run / VPS
 
 ```bash
-python3 bot.py --selftest          # offline checks, no token needed
-PORT=8099 python3 bot.py --token 1:fake &   # watch the startup banner
-curl -i localhost:8099/health
+docker build -t apb .
+docker run -d --restart unless-stopped \
+  -e APB_TOKEN="123:ABC" -e APB_ADMINS="123456789" \
+  -p 8080:8080 -v apb-data:/data apb
 ```
+
+Behind a reverse proxy, terminate TLS in front of port 8080 and point the
+health check at `/health`.
+
+---
+
+## 💾 Persistent state
+
+Everything (chats, drafts, schedules, channels, templates, settings, counters)
+lives in one JSON file: `$APB_DATA_DIR/apb.json` (default `./data/apb.json`).
+Writes are atomic (temp file + rename), so a crash mid-write cannot corrupt it.
+
+* Platforms with **ephemeral disks** (Veroa, Render's default fs, Railway,
+  Cloud Run): the file survives restarts of the same instance, but a redeploy
+  starts clean. Mount a disk/volume and set `APB_DATA_DIR` to keep it.
+* If the directory is not writable, the bot logs a warning and falls back to
+  `/tmp/apb-data` instead of crash-looping.
+* A corrupt file is moved aside (`apb.json.corrupt-<ts>`) and the bot starts
+  fresh rather than refusing to boot.
+
+No database, no migrations, no external services.
+
+---
+
+## 🧯 Troubleshooting
+
+| Symptom | Cause & fix |
+| :- | :- |
+| `Deploy aborted - the new version was crash-looping` right after “Using Node.js 20” | The service is still building a **Python** repo or running `python bot.py`. Point it at this branch (it is Node-only now): start `npm start`. |
+| Log says `NO BOT TOKEN SET` but the deploy succeeded | Working as designed — the bot stays up and waits. Set `APB_TOKEN` on the service, then restart. `/ready` flips to 200 once it logs in. |
+| `Could not log in to Telegram: Not Found (404)` / `Unauthorized (401)` | The token is wrong/revoked or has stray quotes/spaces. Copy the full `123456789:AA…` string from @BotFather into `APB_TOKEN`. |
+| `cannot reach api.telegram.org` | Outbound HTTPS is blocked (egress firewall/proxy) or DNS fails. Allow `api.telegram.org:443`, or set `HTTPS_PROXY`. |
+| Deploy succeeds, browser URL shows “starting / not logged in” forever | `/ready` only turns green after a successful `getMe`. Check the log lines above for the token/network hints. |
+| Service URL returns 502 | The platform expects a port; something set `--no-health` or `PORT` to a busy port. Remove `--no-health` and use `npm start`. |
+| Bot answers but forgets everything after a redeploy | No persistent disk. Set `APB_DATA_DIR` to a mounted volume. |
+| `⚠️ Telegram said no: Bad Request: chat not found` when publishing to a channel | The bot is not an admin in that channel, or the `@username`/id is wrong. Add it via `/channels` as an admin there. |
+| AI buttons say `AI is off` | `APB_NVIDIA_KEY` is missing. Grab a free key at build.nvidia.com and restart. |
+| Nothing in logs at all | Set `APB_LOG_LEVEL=debug` and redeploy; the bot prints the token source, data dir, port and every API error. |
+
+---
+
+## 🧪 Verify without deploying
+
+```bash
+npm test                 # 265 offline checks — no token, no network
+npm start                # run locally; open http://localhost:8080
+curl -s localhost:8080/health | head -20
+```
+
+`npm test` exercises the parsers, rich-message builders, the store, the
+debounced editor, the API client (mocked `fetch`), the NVIDIA client (mocked
+SSE), the composer flow, all Posto features, the scheduler and the HTTP server.

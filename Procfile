@@ -1,21 +1,19 @@
-# Advanced Posting Bot is a pure Python 3 app (zero third-party deps).
+# Advanced Posting Bot is a Node.js app with ZERO npm dependencies.
 #
-# It is a long-running Telegram *poller*. Historically it opened no socket at
-# all, which makes "web service" platforms hang on
-#   ==> Waiting for your service to be ready
-# and then abort the release as crash-looping. bot.py now also serves a tiny
-# health endpoint on $PORT (see apb/health.py), so it satisfies both shapes:
+# It is a long-polling Telegram bot (outbound HTTPS to api.telegram.org only)
+# that *also* serves a tiny HTTP status page on $PORT, so it satisfies both
+# web-service and worker shapes of every platform:
 #
-#   web    → for platforms that require a listening port + health check
-#   worker → for platforms that happily run a background process
+#   web    → platforms that require a listening port + health check   (/health)
+#   worker → platforms that happily run a background process
 #
-# Pick whichever your platform starts; both run exactly the same code.
-# If your platform ignores Procfile, set the start command to `python bot.py`.
+# Both run exactly the same code. If your platform ignores the Procfile, set
+# the start command to `npm start` (or `node src/index.js`).
 #
 #   required env:  APB_TOKEN        (bot token from @BotFather)
 #   optional env:  APB_ADMINS       (comma-separated Telegram user ids)
-#   optional env:  APB_NVIDIA_KEY   (nvapi-... key for the free AI features)
+#   optional env:  APB_NVIDIA_KEY   (nvapi-... free key for the AI features)
 #   optional env:  APB_DATA_DIR     (persistent dir; default ./data)
-#   optional env:  PORT / APB_PORT  (health port; unset → no socket at all)
-web: python bot.py
-worker: python bot.py
+#   optional env:  PORT / APB_PORT  (HTTP port; default 8080)
+web: npm start
+worker: node src/index.js --no-health
