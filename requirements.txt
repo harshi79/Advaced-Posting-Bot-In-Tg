@@ -1,0 +1,3 @@
+# Advanced Posting Bot needs NO third-party packages.
+# Everything runs on the Python 3 standard library (urllib, json, threading…)
+# so the newest Bot API 10.x methods are always available immediately.
