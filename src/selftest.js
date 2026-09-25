@@ -330,6 +330,20 @@ function testRich() {
   check('plainText from blocks', R.plainText([R.heading('Hi', 2), R.paragraph('there')]).includes('Hi'));
   check('irmPlainText from markdown', R.irmPlainText({ markdown: '**x**' }) === 'x');
   eq('MAX_BLOCKS constant', R.MAX_BLOCKS, 500);
+
+  // regression: inline-only RichText entities (bold, reference, reference_link,
+  // anchor_link, …) accidentally placed at block level must be auto-wrapped in
+  // a paragraph so Telegram does not reject the message with
+  // "can't parse InputRichBlock: type \"reference\" is unsupported".
+  const wrapped = R.asBlocks([R.reference('src text', '1'), R.bold('b')]);
+  eq('asBlocks wraps inline-only reference in paragraph', wrapped[0].type, 'paragraph');
+  eq('wrapped reference preserved', wrapped[0].text.type, 'reference');
+  eq('asBlocks wraps inline-only bold in paragraph', wrapped[1].type, 'paragraph');
+  // valid block types that share a type with inline RichText must NOT be wrapped
+  eq('anchor block is left alone', R.asBlocks(R.anchor('top'))[0].type, 'anchor');
+  eq('math block is left alone', R.asBlocks(R.mathBlock('x'))[0].type, 'mathematical_expression');
+  // a single inline-only object (not in array) is wrapped too
+  eq('single inline-only wraps', R.asBlocks(R.referenceLink('[1]', '1'))[0].type, 'paragraph');
 }
 
 function testMdBlocks() {

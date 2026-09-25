@@ -281,11 +281,15 @@ export function demoBlocks() {
 
     R.heading('8 · Footnotes & anchors', 3),
     R.paragraph([
-      'Claims need sources', R.superscript('[1]'), '. Or jump ',
+      'Claims need sources',
+      R.superscript(R.referenceLink('[1]', '1')),
+      '. Or jump ',
       R.anchorLink('⬆ back to the top', ''),
       ' of this message.',
     ]),
-    R.reference('core.telegram.org/bots/api-changelog — the official changelog, all versions', '1'),
+    R.paragraph([
+      R.superscript(R.reference('core.telegram.org/bots/api-changelog — the official changelog, all versions', '1')),
+    ]),
 
     R.divider(),
     R.footer('One message · 500-block budget · 32K chars — sent free by Advanced Posting Bot 🤖'),

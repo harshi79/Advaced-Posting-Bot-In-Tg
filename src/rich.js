@@ -74,6 +74,33 @@ export const divider = () => ({ type: 'divider' });
 export const mathBlock = (expression) => ({ type: 'mathematical_expression', expression });
 export const blockAnchor = (name) => ({ type: 'anchor', name });
 
+// RichText entity types that are INLINE-ONLY — they must live inside a block's
+// text, never as a top-level InputRichBlock. Telegram rejects them with
+//   "can't parse InputRichBlock: type \"<name>\" is unsupported"
+// when they appear at block level, so asBlocks() auto-wraps them in a paragraph
+// to prevent a whole class of "it worked in my head" bugs.
+//
+// Types deliberately NOT listed here because they are ALSO valid blocks:
+//   • "anchor"                   — InputRichBlockAnchor {type,name} (same shape
+//                                 as inline RichTextAnchor)
+//   • "mathematical_expression"  — RichBlockMathematicalExpression and inline
+//                                 RichTextMathematicalExpression share the same
+//                                 {type,expression} shape
+const INLINE_ONLY_TYPES = new Set([
+  'bold', 'italic', 'underline', 'strikethrough', 'spoiler', 'code', 'marked',
+  'subscript', 'superscript',
+  'text_mention', 'custom_emoji', 'date_time', 'button',
+  'url', 'email_address', 'phone_number', 'bank_card_number',
+  'mention', 'hashtag', 'cashtag', 'bot_command',
+  'anchor_link', 'reference', 'reference_link',
+]);
+
+function isInlineOnly(x) {
+  return x && typeof x === 'object' && !Array.isArray(x)
+    && typeof x.type === 'string'
+    && INLINE_ONLY_TYPES.has(x.type);
+}
+
 /** Normalize string | RichText | block | array thereof into a block list. */
 export function asBlocks(x) {
   if (x === null || x === undefined) return [];
@@ -82,12 +109,23 @@ export function asBlocks(x) {
     const out = [];
     for (const item of x) {
       if (item === null || item === undefined) continue;
-      if (typeof item === 'string') out.push(paragraph(item));
-      else out.push(item);
+      if (typeof item === 'string') {
+        out.push(paragraph(item));
+      } else if (isInlineOnly(item)) {
+        // An inline-only RichText entity slipped in at block level (e.g. a
+        // footnote reference placed outside a paragraph). Wrap it in a
+        // paragraph so Telegram doesn't 400 the whole message.
+        out.push(paragraph(item));
+      } else {
+        out.push(item);
+      }
     }
     return out;
   }
-  if (typeof x === 'object') return [x];
+  if (typeof x === 'object') {
+    if (isInlineOnly(x)) return [paragraph(x)];
+    return [x];
+  }
   return [paragraph(String(x))];
 }
 
