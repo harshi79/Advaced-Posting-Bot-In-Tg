@@ -1,0 +1,7 @@
+# Advanced Posting Bot needs NO third-party packages.
+# Everything runs on the Python 3 standard library (urllib, json, threading…)
+# so the newest Bot API 10.x methods are always available immediately.
+#
+# Optional extras:
+#   pip install Pillow   # real photo watermarks (©️ watermark feature)
+#                       # without it, the bot gracefully uses text signatures
