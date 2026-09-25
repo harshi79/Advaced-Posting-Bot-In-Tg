@@ -19,7 +19,7 @@ import { parseButtonRows, parseDelay, parseInterval, parseWhen, fmtWhen, kb } fr
 import { mdToBlocks, inline } from './mdblocks.js';
 import { Store } from './store.js';
 import { Debouncer, SmoothEditor, SmoothStream } from './smooth.js';
-import { Telegram, TelegramError, isUnknownMethod } from './telegram.js';
+import { Telegram, TelegramError, isEffectError, isUnknownMethod } from './telegram.js';
 import { NVIDIA, AIError } from './nvidia.js';
 import { Bot } from './handlers.js';
 import { Scheduler } from './scheduler.js';
@@ -544,6 +544,62 @@ async function testTelegram() {
     eq('updates returned', batch.length, 2);
     eq('offset advanced', poller.offset, 12);
 
+    // EFFECT_ID_INVALID: the message must still arrive, just without the effect
+    const effectAttempts = [];
+    globalThis.fetch = async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      effectAttempts.push(body);
+      if (body.message_effect_id) {
+        return new Response(JSON.stringify({
+          ok: false, error_code: 400,
+          description: 'Bad Request: EFFECT_ID_INVALID',
+        }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 42 } }), { status: 200 });
+    };
+    const effTg = new Telegram('123:ABC');
+    const effRes = await effTg.call('sendRichMessage', {
+      chat_id: 7, rich_message: { markdown: 'hi' }, message_effect_id: '5044134455711629726',
+    });
+    eq('effect error still delivers the message', effRes.message_id, 42);
+    eq('exactly one retry was made', effectAttempts.length, 2);
+    eq('first attempt carried the effect', effectAttempts[0].message_effect_id, '5044134455711629726');
+    eq('retry dropped the effect', effectAttempts[1].message_effect_id, undefined);
+    check('the rejected id is remembered', effTg.deadEffectIds.has('5044134455711629726'));
+
+    effectAttempts.length = 0;
+    await effTg.call('sendRichMessage', {
+      chat_id: 7, rich_message: { markdown: 'again' }, message_effect_id: '5044134455711629726',
+    });
+    eq('known-dead effect is skipped up front', effectAttempts.length, 1);
+    eq('and it is not sent at all', effectAttempts[0].message_effect_id, undefined);
+
+    check('isEffectError recognises EFFECT_ID_INVALID',
+      isEffectError(new TelegramError('x', 'Bad Request: EFFECT_ID_INVALID', 400)));
+    check('isEffectError ignores other 400s',
+      !isEffectError(new TelegramError('x', 'Bad Request: chat not found', 400)));
+
+    // multipart fallback (a media post with a stale effect)
+    let multipartEffectParams = null;
+    let multipartSawFile = false;
+    globalThis.fetch = async (url, opts) => {
+      const hasEffect = opts.body.get('message_effect_id') !== null;
+      multipartEffectParams = opts.body.get('message_effect_id');
+      multipartSawFile = multipartSawFile || opts.body.get('wmm1') !== null;
+      if (hasEffect) {
+        return new Response(JSON.stringify({
+          ok: false, error_code: 400, description: 'Bad Request: EFFECT_ID_INVALID',
+        }), { status: 400, headers: { 'content-type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ ok: true, result: { message_id: 43 } }), { status: 200 });
+    };
+    const effMedia = await new Telegram('123:ABC').callMultipart('sendRichMessage', {
+      wmm1: { filename: 'w.jpg', bytes: Buffer.from('abc'), contentType: 'image/jpeg' },
+    }, { chat_id: 7, rich_message: { markdown: 'hi' }, message_effect_id: '9999' });
+    eq('multipart effect error still delivers', effMedia.message_id, 43);
+    eq('multipart retry dropped the effect', multipartEffectParams, null);
+    check('multipart retry kept the upload', multipartSawFile);
+
     // multipart
     globalThis.fetch = async (url, opts) => {
       seen.push({ url: String(url), opts });
@@ -639,6 +695,26 @@ function testContent() {
   check('help mentions /bulk', content.helpMarkdown().includes('/bulk'));
   check('composer help mentions preview', content.composerHelpMarkdown().includes('/preview'));
   check('effects table has ❤️', Boolean(content.EFFECTS['❤️']));
+  check('dead ❤️ effect id was replaced',
+    content.EFFECTS['❤️'] !== '5044134455711629726');
+  check('every effect id is numeric', Object.values(content.EFFECTS).every((v) => /^\d{4,}$/.test(v)));
+  const savedEffectEnv = process.env.APB_EFFECT_IDS;
+  delete process.env.APB_EFFECT_IDS;
+  eq('effectId resolves a known emoji', content.effectId('🔥'), content.EFFECTS['🔥']);
+  eq('effectId → null for unknown emoji', content.effectId('🦄'), null);
+  eq('effectId ignores a malformed override',
+    content.effectId('🔥', { '🔥': 'not-an-id' }), content.EFFECTS['🔥']);
+  eq('effectId honours a valid override',
+    content.effectId('🔥', { '🔥': '1234567890' }), '1234567890');
+  process.env.APB_EFFECT_IDS = '{"🔥":"1111111111"}';
+  eq('APB_EFFECT_IDS overrides the table', content.effectId('🔥'), '1111111111');
+  eq('APB_EFFECT_IDS ignores other emoji', content.effectId('❤️'), content.EFFECTS['❤️']);
+  eq('bad JSON override is ignored', (() => {
+    process.env.APB_EFFECT_IDS = '{oops';
+    return content.effectId('🔥');
+  })(), content.EFFECTS['🔥']);
+  if (savedEffectEnv === undefined) delete process.env.APB_EFFECT_IDS;
+  else process.env.APB_EFFECT_IDS = savedEffectEnv;
   check('stream text non-empty', content.STREAM_TEXT.length > 100);
   eq('demo keyboard is a keyboard', content.demoFooterKeyboard().inline_keyboard.length, 3);
 }

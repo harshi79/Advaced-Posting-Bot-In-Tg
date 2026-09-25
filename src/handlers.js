@@ -40,6 +40,15 @@ export class Bot {
     ));
   }
 
+  /**
+   * Effect id for `emoji`, honouring `settings.effect_ids` in data/apb.json
+   * and the `APB_EFFECT_IDS` env var. Returns null when nothing valid is known,
+   * so callers send the message *without* the effect instead of failing.
+   */
+  effectId(emoji) {
+    return content.effectId(emoji, this.store.setting('effect_ids'));
+  }
+
   // ================================================================= router
 
   /** Enqueue an update; handlers run strictly in order, never concurrently. */
@@ -156,7 +165,8 @@ export class Bot {
       keyboard.inline_keyboard.push([{ text: '✍️ New post', callback_data: `${CB}:post`, style: 'success' }]);
     }
     const kwargs = {};
-    if (chat.type === 'private') kwargs.message_effect_id = content.EFFECTS['❤️'];
+    const heart = this.effectId('❤️');
+    if (chat.type === 'private' && heart) kwargs.message_effect_id = heart;
     await this.api.sendRich(chat.id, irm, { reply_markup: keyboard, ...kwargs });
   }
 
@@ -524,9 +534,12 @@ export class Bot {
         return;
       }
       await this.api.answerCbq(cbq.id, { text: '🪄 Watch the next message…' });
-      await this.api.sendRich(chatId, R.markdownMessage(`This message arrived with a ${emoji} effect.`), {
-        message_effect_id: content.EFFECTS[emoji],
-      });
+      const eid = this.effectId(emoji);
+      await this.api.sendRich(
+        chatId,
+        R.markdownMessage(`This message arrived with a ${emoji} effect.`),
+        eid ? { message_effect_id: eid } : {},
+      );
       return;
     }
     if (action === 'noop') {
@@ -789,7 +802,8 @@ export class Bot {
     const problems = R.checkLimits(irm);
     if (problems.length) throw new Error(problems.join('; '));
     const kwargs = {};
-    if (privateChat && comp.effect) kwargs.message_effect_id = content.EFFECTS[comp.effect];
+    const eid = privateChat && comp.effect ? this.effectId(comp.effect) : null;
+    if (eid) kwargs.message_effect_id = eid;
     try {
       if (Object.keys(files).length) {
         return await this.api.sendRichMultipart(chatId, irm, files, { reply_markup: markup, ...kwargs });

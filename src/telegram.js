@@ -56,6 +56,17 @@ export function isUnknownMethod(err) {
         .test(err.description || ''));
 }
 
+/**
+ * True when Telegram rejected `message_effect_id` — the ids are undocumented
+ * and get rotated, so the send is retried without the effect instead of being
+ * lost (see content.EFFECTS).
+ */
+export function isEffectError(err) {
+  if (!(err instanceof TelegramError)) return false;
+  if (err.errorCode !== 400) return false;
+  return /effect_id|effect id|message_effect/i.test(err.description || '');
+}
+
 function timeoutSignal(seconds) {
   if (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function') {
     return AbortSignal.timeout(Math.max(1000, Math.round(seconds * 1000)));
@@ -71,22 +82,42 @@ export class Telegram {
     this.base = String(base || 'https://api.telegram.org').replace(/\/+$/, '');
     this.offset = 0;
     this.calls = 0;
+    /** Effect ids Telegram has already rejected — never sent twice. */
+    this.deadEffectIds = new Set();
   }
 
   // ------------------------------------------------------------------ core
 
-  /** POST a JSON request; resolves with the `result` field. */
+  /**
+   * POST a JSON request; resolves with the `result` field.
+   *
+   * `message_effect_id` gets special care: Telegram's effect ids are
+   * undocumented and rotate, so a rejected one (`EFFECT_ID_INVALID`) is
+   * remembered and the very same message is retried without the effect — an
+   * animation is never worth losing a /start or a publish over.
+   */
   async call(method, params = {}, { timeout = null } = {}) {
     const payload = {};
     for (const [k, v] of Object.entries(params)) {
       if (v === null || v === undefined) continue;
       payload[k] = v;
     }
-    return this.#request(method, {
+    if (payload.message_effect_id !== undefined
+        && this.deadEffectIds.has(String(payload.message_effect_id))) {
+      delete payload.message_effect_id;
+    }
+    const send = () => this.#request(method, {
       body: JSON.stringify(payload),
       contentType: 'application/json',
       timeout: timeout ?? this.timeout,
     });
+    try {
+      return await send();
+    } catch (err) {
+      if (!isEffectError(err) || payload.message_effect_id === undefined) throw err;
+      this.#dropEffect(method, payload, err);
+      return send();
+    }
   }
 
   /**
@@ -95,20 +126,40 @@ export class Telegram {
    * Needed when a rich message embeds uploads via `attach://<name>`.
    */
   async callMultipart(method, files, params = {}, { timeout = null } = {}) {
-    const form = new FormData();
-    for (const [k, v] of Object.entries(params)) {
-      if (v === null || v === undefined) continue;
-      form.append(k, (typeof v === 'object') ? JSON.stringify(v) : String(v));
-    }
-    for (const [name, file] of Object.entries(files || {})) {
-      const blob = new Blob([file.bytes], { type: file.contentType || 'application/octet-stream' });
-      form.append(name, blob, file.filename || name);
-    }
-    return this.#request(method, {
-      body: form,
+    const build = () => {
+      const form = new FormData();
+      for (const [k, v] of Object.entries(params)) {
+        if (v === null || v === undefined) continue;
+        if (k === 'message_effect_id' && this.deadEffectIds.has(String(v))) continue;
+        form.append(k, (typeof v === 'object') ? JSON.stringify(v) : String(v));
+      }
+      for (const [name, file] of Object.entries(files || {})) {
+        const blob = new Blob([file.bytes], { type: file.contentType || 'application/octet-stream' });
+        form.append(name, blob, file.filename || name);
+      }
+      return form;
+    };
+    const send = () => this.#request(method, {
+      body: build(),
       contentType: null, // fetch sets the multipart boundary itself
       timeout: (timeout ?? this.timeout) + 60,
     });
+    try {
+      return await send();
+    } catch (err) {
+      if (!isEffectError(err) || params.message_effect_id === undefined) throw err;
+      this.#dropEffect(method, params, err);
+      return send();
+    }
+  }
+
+  /** Forget an effect id Telegram refused and warn once, so the log explains it. */
+  #dropEffect(method, params, err) {
+    const id = params.message_effect_id;
+    this.deadEffectIds.add(String(id));
+    delete params.message_effect_id;
+    log.warn(`${method}: message_effect_id ${id} rejected (${err.description}) — `
+      + 'resending without the effect; update APB_EFFECT_IDS to fix the animation');
   }
 
   async #request(method, { body, contentType, timeout }) {

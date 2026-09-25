@@ -1,6 +1,6 @@
 {
   "name": "advanced-posting-bot",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "private": true,
   "description": "Advanced Posting Bot for Telegram — rich-media posting, scheduling, bulk posting, channels, templates and free NVIDIA AI. 100% Node.js, zero runtime dependencies, Bot API 10.3.",
   "type": "module",

@@ -48,7 +48,7 @@ export APB_NVIDIA_KEY="nvapi-..."
 # 3. run (Node 20+, nothing to install!)
 npm start
 
-# offline sanity checks — 265 checks, no token, no network
+# offline sanity checks — 286 checks, no token, no network
 npm test
 ```
 
@@ -73,6 +73,7 @@ APB_TOKEN        123456789:AA…        # required
 APB_ADMINS       123456789            # optional, comma-separated user ids
 APB_NVIDIA_KEY   nvapi-…              # optional, free AI
 APB_DATA_DIR     /data                # optional, persistent state
+APB_EFFECT_IDS   '{"❤️":"5159…"}'      # optional, message-effect ids (see notes)
 ```
 
 ```bash
@@ -144,7 +145,7 @@ private chats, smooth edits elsewhere) and becomes your post with one tap.
 | **Ephemeral messages** — replies only one user can see | 10.2/10.3 | `/id`, `/ping`, 👀 demo button in groups |
 | **Buttons inside the message body** with colors | 10.3 | `/demo` section 7 |
 | Colored classic buttons (`primary`/`success`/`danger`) | 9.4 | every keyboard |
-| Message effects (🎉 🔥 ❤️) | 7.2 | `/start` in private chat |
+| Message effects (🎉 🔥 ❤️) | 7.2 | `/start` in private chat, `🪄 Effect` in the composer |
 
 ## 📖 Commands
 
@@ -206,7 +207,7 @@ src/
 ├── store.js           atomic JSON persistence (data/apb.json)
 ├── content.js         welcome/help/demo content
 ├── utils.js           time/interval/button-row parsing
-└── selftest.js        265 offline checks (npm test)
+└── selftest.js        286 offline checks (npm test)
 ```
 
 **Smooth editing, exactly:** `SmoothEditor` coalesces any number of `update()`
@@ -227,6 +228,12 @@ a crashed handler are all logged with an exact fix and retried forever while
   (old clients get degraded text).
 - `sendRichMessageDraft` and message effects: **private chats only**;
   ephemeral messages: **groups/supergroups only** — the bot falls back gracefully.
+- Message-effect ids are **undocumented and rotate** (Telegram's original ❤️ id now
+  answers `400 EFFECT_ID_INVALID`). The bot uses the current ids, and if one is ever
+  rejected it logs a warning, remembers the bad id and re-sends the message
+  **without the effect** — so a stale animation can never break `/start` or a publish.
+  Override ids without a redeploy with `APB_EFFECT_IDS='{"❤️":"…"}'` (or
+  `settings.effect_ids` in `data/apb.json`).
 - One rich message: **32,768 chars · 500 blocks · 16 nesting · 50 media ·
   20 table columns** (validated before sending).
 - Broadcasts/bulk are paced (~1 msg/s + per-channel delay) to respect limits.
